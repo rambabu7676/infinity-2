@@ -1,0 +1,111 @@
+{
+  "entities": {
+    "Reel": {
+      "title": "Reel",
+      "description": "Short video reel with Cloudinary media URL and engagement metadata",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "title": { "type": "string", "description": "Caption and hashtags" },
+        "user": { "type": "string", "description": "Creator username" },
+        "userAvatar": { "type": "string", "description": "Creator avatar URL" },
+        "videoUrl": { "type": "string", "description": "Cloudinary video URL with f_auto,q_auto delivery" },
+        "posterUrl": { "type": "string", "description": "Cloudinary poster/thumbnail URL" },
+        "views": { "type": "string" },
+        "viewsCount": { "type": "number" },
+        "likes": { "type": "string" },
+        "likesCount": { "type": "number" },
+        "comments": { "type": "string" },
+        "shares": { "type": "string" },
+        "soundTitle": { "type": "string" },
+        "category": { "type": "string" },
+        "isLiked": { "type": "boolean" },
+        "isSaved": { "type": "boolean" },
+        "isFollowing": { "type": "boolean" },
+        "timestamp": { "type": "number" },
+        "createdAt": { "type": "string" },
+        "cloudinary": {
+          "type": "object",
+          "description": "Cloudinary storage metadata (publicId, format, bytes, duration, secureUrl)"
+        }
+      },
+      "required": ["id", "title", "user", "videoUrl"]
+    },
+    "Story": {
+      "title": "Story",
+      "description": "User story container holding 24-hour photo/video slides",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "userId": { "type": "string" },
+        "username": { "type": "string" },
+        "userAvatar": { "type": "string" },
+        "isMyStory": { "type": "boolean" },
+        "hasUnseen": { "type": "boolean" },
+        "slides": { "type": "array" },
+        "timestamp": { "type": "number" }
+      },
+      "required": ["id", "userId", "username"]
+    },
+    "Post": {
+      "title": "Post",
+      "description": "Gallery photo or video post with Cloudinary media URL",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "caption": { "type": "string" },
+        "user": { "type": "string" },
+        "userAvatar": { "type": "string" },
+        "mediaUrl": { "type": "string", "description": "Optimized Cloudinary photo or video URL" },
+        "mediaType": { "type": "string", "enum": ["image", "video"] },
+        "likesCount": { "type": "number" },
+        "commentsCount": { "type": "number" },
+        "timestamp": { "type": "number" },
+        "createdAt": { "type": "string" },
+        "cloudinary": { "type": "object" }
+      },
+      "required": ["id", "user", "mediaUrl"]
+    },
+    "UserProfile": {
+      "title": "UserProfile",
+      "description": "User account profile details and metrics",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string" },
+        "email": { "type": "string" },
+        "name": { "type": "string" },
+        "username": { "type": "string" },
+        "bio": { "type": "string" },
+        "avatarUrl": { "type": "string" },
+        "postsCount": { "type": "number" },
+        "followers": { "type": "number" },
+        "following": { "type": "number" },
+        "totalLikes": { "type": "number" },
+        "totalViews": { "type": "number" },
+        "diamonds": { "type": "number" },
+        "isBlueTick": { "type": "boolean" },
+        "isPremium": { "type": "boolean" },
+        "followingList": { "type": "array" }
+      },
+      "required": ["name", "username"]
+    }
+  },
+  "firestore": {
+    "/reels/{reelId}": {
+      "schema": "Reel",
+      "description": "Reels collection storing captions, text, likes, and Cloudinary video URLs"
+    },
+    "/stories/{storyId}": {
+      "schema": "Story",
+      "description": "Stories collection storing 24h photo and video slides with Cloudinary URLs"
+    },
+    "/posts/{postId}": {
+      "schema": "Post",
+      "description": "Posts collection storing gallery photos and videos with Cloudinary URLs"
+    },
+    "/users/{userId}": {
+      "schema": "UserProfile",
+      "description": "User profiles collection"
+    }
+  }
+}

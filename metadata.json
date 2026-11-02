@@ -1,0 +1,6 @@
+{
+  "name": "Infinity - Short Video & Reels Platform",
+  "description": "Experience Infinity: Short video reels, weighted Spin-To-Win rewards, creator referrals, creator studio camera, and live monetization previews.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

@@ -1,0 +1,46 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Helper functions
+    function isValidString(val, minLen, maxLen) {
+      return val is string && val.size() >= minLen && val.size() <= maxLen;
+    }
+
+    // Reels collection
+    match /reels/{reelId} {
+      allow read: if true;
+      allow create, update: if request.resource.data.title is string
+                            && request.resource.data.user is string
+                            && request.resource.data.videoUrl is string;
+      allow delete: if false;
+    }
+
+    // Stories collection
+    match /stories/{storyId} {
+      allow read: if true;
+      allow create, update: if request.resource.data.username is string;
+      allow delete: if false;
+    }
+
+    // Posts collection
+    match /posts/{postId} {
+      allow read: if true;
+      allow create, update: if request.resource.data.user is string
+                            && request.resource.data.mediaUrl is string;
+      allow delete: if false;
+    }
+
+    // Users collection
+    match /users/{userId} {
+      allow read: if true;
+      allow create, update: if request.resource.data.username is string;
+      allow delete: if false;
+    }
+
+    // Default connection test collection
+    match /test/{docId} {
+      allow read, write: if true;
+    }
+  }
+}
