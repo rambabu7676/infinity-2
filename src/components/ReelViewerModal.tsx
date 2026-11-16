@@ -19,6 +19,10 @@ import {
   Sparkles,
   Copy,
   EyeOff,
+  ThumbsDown,
+  AlertTriangle,
+  Flag,
+  LogIn,
 } from 'lucide-react';
 import { ReelItem } from '../types';
 import { playClickSound, playLikePop } from '../utils/audio';
@@ -37,6 +41,10 @@ interface ReelViewerModalProps {
   onAddComment: (reelId: string, commentText: string) => void;
   onSelectReel: (reel: ReelItem) => void;
   onAddToStory?: (reel: ReelItem) => void;
+  onReportReel?: (reelId: string, reason: string) => void;
+  onDislikeReel?: (reelId: string) => void;
+  isGuest?: boolean;
+  onOpenAuth?: () => void;
 }
 
 export const ReelViewerModal: React.FC<ReelViewerModalProps> = ({
@@ -50,6 +58,10 @@ export const ReelViewerModal: React.FC<ReelViewerModalProps> = ({
   onAddComment,
   onSelectReel,
   onAddToStory,
+  onReportReel,
+  onDislikeReel,
+  isGuest = false,
+  onOpenAuth,
 }) => {
   // Video playback states
   const [isPlaying, setIsPlaying] = useState(true);
@@ -62,6 +74,12 @@ export const ReelViewerModal: React.FC<ReelViewerModalProps> = ({
   const [showCommentsDrawer, setShowCommentsDrawer] = useState(false);
   const [showShareModal, setShowShareModal] = useState(false);
   const [showMoreMenu, setShowMoreMenu] = useState(false);
+
+  // 🚨 Report & Safety System
+  const [showReportModal, setShowReportModal] = useState(false);
+  const [selectedReportReason, setSelectedReportReason] = useState('🚫 स्पैम या भ्रामक सामग्री (Spam or Misleading)');
+  const [reportSubmitted, setReportSubmitted] = useState(false);
+  const [guestAlert, setGuestAlert] = useState<string | null>(null);
 
   // Comment input state
   const [commentInput, setCommentInput] = useState('');
@@ -190,6 +208,16 @@ export const ReelViewerModal: React.FC<ReelViewerModalProps> = ({
     }, 220);
   };
 
+  // Guest Mode guard helper
+  const checkGuestRestricted = (actionName: string): boolean => {
+    if (isGuest) {
+      setGuestAlert(`रील्स ${actionName} करने के लिए कृपया पहले लॉगिन करें! (Login required to ${actionName})`);
+      setTimeout(() => setGuestAlert(null), 3500);
+      return true;
+    }
+    return false;
+  };
+
   // Double tap: Like with heart pop
   const handleDoubleTap = (e: React.MouseEvent) => {
     e.stopPropagation();
@@ -197,6 +225,8 @@ export const ReelViewerModal: React.FC<ReelViewerModalProps> = ({
       clearTimeout(clickTimeoutRef.current);
       clickTimeoutRef.current = null;
     }
+
+    if (checkGuestRestricted('लाइक')) return;
 
     if (currentReel && !currentReel.isLiked) {
       playLikePop();
@@ -332,6 +362,7 @@ export const ReelViewerModal: React.FC<ReelViewerModalProps> = ({
   const handleSendComment = (e?: React.FormEvent) => {
     if (e) e.preventDefault();
     if (!currentReel) return;
+    if (checkGuestRestricted('कमेंट')) return;
     const rawText = (commentInput + (interimText ? ` ${interimText}` : '')).trim();
     if (!rawText) return;
 
@@ -448,12 +479,43 @@ export const ReelViewerModal: React.FC<ReelViewerModalProps> = ({
           </div>
         </header>
 
+        {/* ================= AUTO-HIDE COMMUNITY SAFETY WARNING ================= */}
+        {(currentReel.isAutoHidden || (currentReel.reportsCount && currentReel.reportsCount >= 7)) && (
+          <div className="relative z-30 mx-3 mt-1 p-2 rounded-xl bg-rose-950/85 border border-rose-500/60 backdrop-blur-md flex items-center gap-2 text-rose-200 shadow-lg animate-fadeIn">
+            <AlertTriangle size={16} className="text-rose-400 shrink-0" />
+            <div className="text-[11px] leading-snug">
+              <span className="font-bold text-white">⚠️ जांच के अधीन (Under Admin Review):</span> 7 या अधिक रिपोर्ट्स मिलने के कारण यह वीडियो सामान्य डिस्कवरी से स्वतः हाइड कर दिया गया है।
+            </div>
+          </div>
+        )}
+
+        {/* Guest Action Prompt Toast */}
+        {guestAlert && (
+          <div className="absolute top-16 left-3 right-3 z-50 p-2.5 rounded-xl bg-zinc-900/95 border border-amber-400/80 shadow-2xl flex items-center justify-between gap-2 backdrop-blur-md animate-fadeIn">
+            <div className="flex items-center gap-2 min-w-0">
+              <AlertTriangle size={15} className="text-amber-400 shrink-0" />
+              <span className="text-[11px] text-amber-200 truncate">{guestAlert}</span>
+            </div>
+            <button
+              onClick={() => {
+                setGuestAlert(null);
+                onOpenAuth?.();
+              }}
+              className="px-2.5 py-1 bg-gradient-to-r from-amber-400 to-[#00FF88] text-black font-bold text-[11px] rounded-lg flex items-center gap-1 shrink-0 active:scale-95 shadow-sm"
+            >
+              <LogIn size={11} />
+              <span>लॉगिन</span>
+            </button>
+          </div>
+        )}
+
         {/* ================= 3. FLOATING RIGHT ACTION BAR (Clean Instagram Reels Style) ================= */}
         <div className="absolute right-3 bottom-18 z-30 flex flex-col items-center gap-5">
           {/* 1. Like Button */}
           <button
             onClick={(e) => {
               e.stopPropagation();
+              if (checkGuestRestricted('लाइक')) return;
               playLikePop();
               onToggleLike(currentReel.id);
               if (!currentReel.isLiked) {
@@ -528,6 +590,7 @@ export const ReelViewerModal: React.FC<ReelViewerModalProps> = ({
           <button
             onClick={(e) => {
               e.stopPropagation();
+              if (checkGuestRestricted('सेव')) return;
               playClickSound();
               onToggleSave(currentReel.id);
             }}
@@ -600,6 +663,7 @@ export const ReelViewerModal: React.FC<ReelViewerModalProps> = ({
             <button
               onClick={(e) => {
                 e.stopPropagation();
+                if (checkGuestRestricted('फॉलो')) return;
                 onToggleFollow(currentReel.user);
               }}
               className={`ml-1 px-3 py-1 text-xs font-semibold rounded-full border transition-all active:scale-95 shadow-sm ${
@@ -803,6 +867,48 @@ export const ReelViewerModal: React.FC<ReelViewerModalProps> = ({
           <div className="absolute inset-0 z-40 bg-black/75 backdrop-blur-sm flex flex-col justify-end animate-fadeIn">
             <div className="bg-[#181C20] border-t border-zinc-800 rounded-t-2xl p-4 space-y-2">
               <div className="w-10 h-1 bg-zinc-600 rounded-full mx-auto mb-3" />
+
+              {/* Dislike Reel */}
+              <button
+                onClick={() => {
+                  playClickSound();
+                  onDislikeReel?.(currentReel.id);
+                  setShowMoreMenu(false);
+                }}
+                className="w-full py-2.5 px-3 text-left text-sm text-zinc-200 hover:bg-zinc-800 rounded-xl flex items-center justify-between"
+              >
+                <div className="flex items-center gap-3">
+                  <ThumbsDown size={18} className={currentReel.isDisliked ? 'text-amber-400 fill-amber-400' : ''} />
+                  <span>{currentReel.isDisliked ? 'नापसंद हटाया (Disliked)' : 'नापसंद करें (Dislike Reel)'}</span>
+                </div>
+                {currentReel.isDisliked && (
+                  <span className="text-[10px] text-amber-400 bg-amber-400/15 px-2 py-0.5 rounded-full font-bold">
+                    Disliked
+                  </span>
+                )}
+              </button>
+
+              {/* Report Reel */}
+              <button
+                onClick={() => {
+                  playClickSound();
+                  setShowMoreMenu(false);
+                  setShowReportModal(true);
+                  setReportSubmitted(false);
+                }}
+                className="w-full py-2.5 px-3 text-left text-sm text-rose-400 hover:bg-rose-500/10 rounded-xl flex items-center justify-between"
+              >
+                <div className="flex items-center gap-3">
+                  <AlertTriangle size={18} className="text-rose-400" />
+                  <span>Report Reel (रिपोर्ट करें)</span>
+                </div>
+                {(currentReel.reportsCount || 0) > 0 && (
+                  <span className="text-[10px] text-rose-400 bg-rose-500/15 px-2 py-0.5 rounded-full font-bold">
+                    {currentReel.reportsCount} Reports
+                  </span>
+                )}
+              </button>
+
               <button
                 onClick={() => {
                   navigator.clipboard.writeText(window.location.href);
@@ -829,6 +935,103 @@ export const ReelViewerModal: React.FC<ReelViewerModalProps> = ({
               >
                 Cancel
               </button>
+            </div>
+          </div>
+        )}
+
+        {/* ================= 6.1 REPORT REEL MODAL ================= */}
+        {showReportModal && (
+          <div className="absolute inset-0 z-50 bg-black/85 backdrop-blur-md flex items-center justify-center p-4 animate-fadeIn">
+            <div className="w-full max-w-sm bg-[#161A1D] border border-zinc-800 rounded-2xl p-4 shadow-2xl">
+              <div className="flex items-center justify-between pb-3 border-b border-zinc-800 mb-3">
+                <div className="flex items-center gap-2">
+                  <Flag size={18} className="text-rose-400" />
+                  <h3 className="font-bold text-white text-sm">वीडियो की रिपोर्ट करें</h3>
+                </div>
+                <button
+                  onClick={() => setShowReportModal(false)}
+                  className="text-zinc-400 hover:text-white p-1"
+                >
+                  <X size={18} />
+                </button>
+              </div>
+
+              {reportSubmitted ? (
+                <div className="py-5 text-center space-y-2">
+                  <div className="w-12 h-12 rounded-full bg-emerald-500/20 border border-emerald-500/40 text-[#00FF88] flex items-center justify-center mx-auto mb-2 text-xl font-bold">
+                    ✓
+                  </div>
+                  <p className="text-sm font-bold text-white">रिपोर्ट सफलतापूर्वक दर्ज की गई!</p>
+                  <p className="text-xs text-zinc-400 leading-relaxed px-2">
+                    आपकी रिपोर्ट दर्ज हो चुकी है। INFINITY कम्युनिटी सेफ्टी नियम के तहत यदि इस रील पर 7 या अधिक रिपोर्ट आती हैं, तो यह जनता से तुरंत स्वतः हाइड हो जाएगी।
+                  </p>
+                  <button
+                    onClick={() => setShowReportModal(false)}
+                    className="mt-4 px-6 py-2 rounded-full bg-zinc-800 hover:bg-zinc-700 text-white text-xs font-bold transition-all"
+                  >
+                    ठीक है (Close)
+                  </button>
+                </div>
+              ) : (
+                <>
+                  <p className="text-xs text-zinc-400 mb-2.5">
+                    रिपोर्ट का मुख्य कारण चुनें (Select reason for reporting @{currentReel.user}):
+                  </p>
+
+                  <div className="space-y-1.5 mb-3.5">
+                    {[
+                      '🚫 स्पैम या भ्रामक सामग्री (Spam / Misleading)',
+                      '🔞 अश्लील या अनुचित सामग्री (Adult / Inappropriate)',
+                      '🤬 नफरत फैलाने वाली भाषा (Hate Speech)',
+                      '⚠️ हिंसा या खतरनाक गतिविधियां (Violence)',
+                      '❌ झूठी जानकारी या फ्रॉड (False Info / Scam)',
+                    ].map((reason) => (
+                      <label
+                        key={reason}
+                        onClick={() => setSelectedReportReason(reason)}
+                        className={`flex items-center gap-2.5 p-2 rounded-xl border cursor-pointer text-xs transition-colors ${
+                          selectedReportReason === reason
+                            ? 'border-rose-500 bg-rose-500/10 text-white'
+                            : 'border-zinc-800 bg-zinc-900/60 text-zinc-400 hover:border-zinc-700'
+                        }`}
+                      >
+                        <input
+                          type="radio"
+                          name="reportReason"
+                          checked={selectedReportReason === reason}
+                          onChange={() => setSelectedReportReason(reason)}
+                          className="accent-rose-500"
+                        />
+                        <span>{reason}</span>
+                      </label>
+                    ))}
+                  </div>
+
+                  <div className="p-2.5 rounded-xl bg-zinc-900 border border-zinc-800 text-[11px] text-zinc-400 mb-3.5 leading-relaxed">
+                    🛡️ <strong>7-रिपोर्ट्स ऑटो-प्रोटेक्शन:</strong> रील पर 7 रिपोर्ट्स जमा होते ही यह पब्लिक डिस्कवरी से स्वतः हट जाती है, ताकि समाज और क्रिएटर कम्युनिटी सुरक्षित रहे।
+                  </div>
+
+                  <div className="flex items-center justify-end gap-2 pt-2 border-t border-zinc-800">
+                    <button
+                      type="button"
+                      onClick={() => setShowReportModal(false)}
+                      className="px-3 py-1.5 rounded-xl text-xs font-medium text-zinc-400 hover:text-white"
+                    >
+                      रद्द करें
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        onReportReel?.(currentReel.id, selectedReportReason);
+                        setReportSubmitted(true);
+                      }}
+                      className="px-4 py-2 rounded-xl text-xs font-bold bg-rose-600 hover:bg-rose-500 text-white shadow-lg active:scale-95"
+                    >
+                      रिपोर्ट दर्ज करें
+                    </button>
+                  </div>
+                </>
+              )}
             </div>
           </div>
         )}

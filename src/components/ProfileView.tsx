@@ -371,7 +371,7 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
 
       {/* ---------------- 2. PROFILE HERO (Avatar on Left, Name & Handle on Right) ---------------- */}
       <div className="px-4 pt-4 pb-2 flex items-center gap-4">
-        {/* Large Avatar with Cyan-Emerald Ring and Blue '+' Button (Interactive photo upload) */}
+        {/* Large Avatar with Cyan-Emerald Ring or Royal Gold Ring */}
         <div
           onClick={() => {
             playClickSound();
@@ -380,7 +380,11 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
           className="relative shrink-0 cursor-pointer group"
           title="Tap to change profile photo"
         >
-          <div className="w-20 h-20 rounded-full p-[2.5px] bg-gradient-to-tr from-[#00FF88] via-[#00E5FF] to-[#3B82F6] shadow-[0_0_12px_rgba(0,255,136,0.25)] relative overflow-hidden">
+          <div className={`w-20 h-20 rounded-full p-[2.5px] ${
+            userProfile.goldenThemeEnabled
+              ? 'bg-gradient-to-tr from-amber-400 via-[#FFD700] to-yellow-600 shadow-[0_0_18px_rgba(255,215,0,0.45)]'
+              : 'bg-gradient-to-tr from-[#00FF88] via-[#00E5FF] to-[#3B82F6] shadow-[0_0_12px_rgba(0,255,136,0.25)]'
+          } relative overflow-hidden`}>
             <img
               src={userProfile.avatarUrl || 'https://images.unsplash.com/photo-1506794778202-cad84cf45f1d?w=300&auto=format&fit=crop&q=80'}
               alt={userProfile.name}
@@ -406,11 +410,14 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
               {userProfile.username}
             </h1>
             <CheckCircle2 size={16} className="fill-[#0095F6] text-white shrink-0" />
+            {userProfile.goldenThemeEnabled && (
+              <Crown size={15} className="fill-[#FFD700] text-[#FFD700] shrink-0" />
+            )}
           </div>
           <p className="text-zinc-400 text-xs font-medium tracking-tight mt-0.5 truncate">
             @{userProfile.username}
           </p>
-          {userProfile.email ? (
+          {userProfile.email && !userProfile.isGuest ? (
             <p className="text-[#00FF88] text-[10px] font-mono tracking-tight mt-0.5 truncate flex items-center gap-1">
               <span className="text-[8px]">●</span> {userProfile.email}
             </p>
@@ -429,6 +436,31 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
           )}
         </div>
       </div>
+
+      {/* Guest Mode Alert Banner */}
+      {userProfile.isGuest && (
+        <div className="mx-4 my-2 p-3 bg-gradient-to-r from-blue-950/60 via-zinc-900 to-black border border-[#0095F6]/40 rounded-2xl flex items-center justify-between">
+          <div className="min-w-0 flex-1 mr-2">
+            <p className="text-xs font-bold text-white flex items-center gap-1.5">
+              <span>👀 आप गेस्ट मोड में हैं (Guest Mode)</span>
+            </p>
+            <p className="text-[10px] text-zinc-400 mt-0.5">
+              लाइक, कमेंट, फॉलो या वीडियो पोस्ट करने के लिए कृपया लॉगिन करें।
+            </p>
+          </div>
+          {onOpenAuth && (
+            <button
+              onClick={() => {
+                playClickSound();
+                onOpenAuth();
+              }}
+              className="px-3 py-1.5 rounded-xl bg-gradient-to-r from-[#00E5FF] to-[#0095F6] text-black text-xs font-bold shrink-0 active:scale-95 shadow-md"
+            >
+              लॉग इन
+            </button>
+          )}
+        </div>
+      )}
 
       {/* ---------------- 3. STATS ROW (Posts | Followers | Following | Total Likes) with vertical dividers ---------------- */}
       <div className="px-4 py-3">
@@ -1095,11 +1127,16 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
                 </span>
               </div>
               {/* EXACT USER SPECIFICATION */}
-              <p className="text-xs text-blue-200 font-semibold leading-relaxed">
-                "3 सफल मोबाइल लॉगिन पर ब्लू टिक"
-              </p>
+              <div className="flex items-center justify-between">
+                <p className="text-xs text-blue-200 font-semibold leading-relaxed">
+                  "3 सफल मोबाइल लॉगिन पर ब्लू टिक"
+                </p>
+                <span className="text-[9px] bg-blue-500/20 text-[#0095F6] px-2 py-0.5 rounded-full font-bold">
+                  31 दिन वैधता (31 Days)
+                </span>
+              </div>
               <p className="text-[11px] text-zinc-400">
-                अपने रेफरल लिंक से 3 सफल मोबाइल लॉगिन या नए यूजर इनवाइट पूरे होने पर आपकी प्रोफाइल पर ऑफिशियल ब्लू टिक वेरीफाइड बैच अनलॉक हो जाता है।
+                अपने रेफरल लिंक से 3 सफल मोबाइल लॉगिन या नए यूजर इनवाइट पूरे होने पर आपकी प्रोफाइल पर 31 दिनों के लिए ऑफिशियल ब्लू टिक वेरीफाइड बैच अनलॉक हो जाता है।
               </p>
               <div className="w-full bg-zinc-800 h-2 rounded-full overflow-hidden">
                 <div
@@ -1121,11 +1158,16 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
                 </span>
               </div>
               {/* EXACT USER SPECIFICATION */}
-              <p className="text-xs text-amber-200 font-semibold leading-relaxed">
-                "6 सफल लॉगिन पर प्रीमियम गोल्डन बैच"
-              </p>
+              <div className="flex items-center justify-between">
+                <p className="text-xs text-amber-200 font-semibold leading-relaxed">
+                  "6 सफल लॉगिन पर प्रीमियम गोल्डन बैच"
+                </p>
+                <span className="text-[9px] bg-amber-500/20 text-[#FFD700] px-2 py-0.5 rounded-full font-bold">
+                  31 दिन वैधता (31 Days)
+                </span>
+              </div>
               <p className="text-[11px] text-zinc-400">
-                6 सफल मोबाइल लॉगिन पूरे होने पर आपको रॉयल गोल्ड वीआईपी क्राउन बैच और 100% प्रायोरिटी मोनेटाइजेशन प्राप्त होता है।
+                6 सफल मोबाइल लॉगिन पूरे होने पर 31 दिनों के लिए रॉयल गोल्ड वीआईपी क्राउन बैच और "Royal Golden Look" ऑन/ऑफ स्विच अनलॉक हो जाता है।
               </p>
               <div className="w-full bg-zinc-800 h-2 rounded-full overflow-hidden">
                 <div

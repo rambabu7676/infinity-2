@@ -41,11 +41,13 @@ import {
   getStoriesFromFirebase,
   savePostToFirebase,
   saveUserProfileToFirebase,
+  reportReelInFirebase,
 } from './firebase/services';
 import {
   subscribeToAuthState,
   fetchUserProfile,
-  logOutUser
+  logOutUser,
+  createGuestProfile,
 } from './firebase/authService';
 
 export default function App() {
@@ -351,6 +353,101 @@ export default function App() {
     showToast('Comment Posted', `Added comment to @${selectedVideo?.user || 'reel'}`);
   };
 
+  // 👎 Dislike Reel
+  const handleDislikeReel = (reelId: string) => {
+    playClickSound();
+    setReels((prev) =>
+      prev.map((r) => {
+        if (r.id === reelId) {
+          const nextDisliked = !r.isDisliked;
+          const currentDislikes = r.dislikesCount || 0;
+          return {
+            ...r,
+            isDisliked: nextDisliked,
+            dislikesCount: nextDisliked ? currentDislikes + 1 : Math.max(0, currentDislikes - 1),
+          };
+        }
+        return r;
+      })
+    );
+
+    if (selectedVideo && selectedVideo.id === reelId) {
+      setSelectedVideo((prev) => {
+        if (!prev) return null;
+        const nextDisliked = !prev.isDisliked;
+        const currentDislikes = prev.dislikesCount || 0;
+        return {
+          ...prev,
+          isDisliked: nextDisliked,
+          dislikesCount: nextDisliked ? currentDislikes + 1 : Math.max(0, currentDislikes - 1),
+        };
+      });
+    }
+  };
+
+  // ⚠️ Report Reel & 7-Reports Auto-Hide
+  const handleReportReel = async (reelId: string, reason: string) => {
+    let isHidden = false;
+    setReels((prev) =>
+      prev.map((r) => {
+        if (r.id === reelId) {
+          const count = (r.reportsCount || 0) + 1;
+          const autoHide = count >= 7;
+          if (autoHide) isHidden = true;
+          return {
+            ...r,
+            reportsCount: count,
+            isAutoHidden: autoHide,
+          };
+        }
+        return r;
+      })
+    );
+
+    if (selectedVideo && selectedVideo.id === reelId) {
+      setSelectedVideo((prev) => {
+        if (!prev) return null;
+        const count = (prev.reportsCount || 0) + 1;
+        return {
+          ...prev,
+          reportsCount: count,
+          isAutoHidden: count >= 7,
+        };
+      });
+    }
+
+    try {
+      await reportReelInFirebase(reelId, userProfile.uid || 'anonymous', reason);
+    } catch (err) {
+      console.warn('Could not record report in Firebase:', err);
+    }
+
+    if (isHidden) {
+      showToast('कम्युनिटी सेफ्टी 🛡️', '7+ रिपोर्ट्स मिलने पर यह वीडियो पब्लिक डिस्कवरी से स्वतः हाइड (Admin Review) हो गया है।');
+    } else {
+      showToast('रिपोर्ट दर्ज', 'आपकी रिपोर्ट सुरक्षित रूप से दर्ज कर ली गई है।');
+    }
+  };
+
+  // 👑 Royal Gold VIP Theme Toggle
+  const handleToggleGoldenTheme = () => {
+    playClickSound();
+    setUserProfile((prev) => {
+      const next = { ...prev, goldenThemeEnabled: !prev.goldenThemeEnabled };
+      saveUserProfileToFirebase(next);
+      return next;
+    });
+  };
+
+  // 👤 Guest Mode Handler ("बिना लॉगिन के रील्स देखें")
+  const handleContinueAsGuest = () => {
+    playClickSound();
+    const guestProfile = createGuestProfile();
+    setUserProfile(guestProfile);
+    setAuthModalOpen(false);
+    showToast('गेस्ट मोड एक्टिव! 👀', 'आप बिना लॉगिन के सभी रील्स देख सकते हैं। लाइक/कमेंट के लिए प्रोफाइल से लॉगिन करें।');
+  };
+
   // Media Upload & Publishing (Reels and Posts)
   const handlePublishReel = async (newReel: ReelItem, format: 'Reel' | 'Post' = 'Reel') => {
     const reelWithTimestamp: ReelItem = {
@@ -461,8 +558,12 @@ export default function App() {
     }
   };
 
-  // Filter reels for For You vs Following
+  // Filter reels for For You vs Following (7-Reports Auto-Hide Rule)
   const filteredReels = reels.filter((r) => {
+    // 7+ reports auto-hide rule: automatically hidden from public discovery
+    if (r.isAutoHidden || (r.reportsCount && r.reportsCount >= 7)) {
+      return false;
+    }
     if (feedType === 'ForYou') {
       return r.category === 'foryou' || r.category === 'both';
     }
@@ -584,7 +685,7 @@ export default function App() {
         {/* ---------------- 1. HOME SCREEN (INFINITY FEED) ---------------- */}
         {activeTab === 'Home' && (
           <HomeFeedView
-            reels={reels}
+            reels={filteredReels}
             stories={stories}
             userProfile={userProfile}
             diamonds={diamonds}
@@ -603,7 +704,7 @@ export default function App() {
         {/* ---------------- 2. SEARCH / EXPLORE SCREEN ---------------- */}
         {activeTab === 'Search' && (
           <ExploreView
-            reels={reels}
+            reels={reels.filter((r) => !r.isAutoHidden && (r.reportsCount || 0) < 7)}
             onSelectReel={(reel) => setSelectedVideo(reel)}
           />
         )}
@@ -746,6 +847,10 @@ export default function App() {
             onToggleFollow={handleToggleFollow}
             onAddComment={handleAddComment}
             onSelectReel={(r) => setSelectedVideo(r)}
+            onReportReel={handleReportReel}
+            onDislikeReel={handleDislikeReel}
+            isGuest={Boolean(userProfile.isGuest)}
+            onOpenAuth={() => setAuthModalOpen(true)}
             onAddToStory={(reelToShare) => {
               handleAddStorySlide({
                 id: `slide-${Date.now()}`,
@@ -786,6 +891,8 @@ export default function App() {
           dailyFollows={userProfile.dailyFollows}
           isPrivate={userProfile.isPrivate}
           userProfile={userProfile}
+          goldenThemeEnabled={Boolean(userProfile.goldenThemeEnabled)}
+          onToggleGoldenTheme={handleToggleGoldenTheme}
           onOpenAuth={() => {
             setSettingsVisible(false);
             setAuthModalOpen(true);
@@ -803,6 +910,7 @@ export default function App() {
         <AuthModal
           isOpen={authModalOpen}
           onClose={() => setAuthModalOpen(false)}
+          onContinueAsGuest={handleContinueAsGuest}
           onAuthSuccess={(newProfile) => {
             setUserProfile((prev) => ({
               ...prev,

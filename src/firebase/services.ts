@@ -9,7 +9,7 @@ import {
   limit
 } from 'firebase/firestore';
 import { db, auth } from './config';
-import { ReelItem, StoryItem, UserProfile } from '../types';
+import { ReelItem, StoryItem, UserProfile, FeedbackItem } from '../types';
 
 export enum OperationType {
   CREATE = 'create',
@@ -206,5 +206,56 @@ export async function getUserProfileFromFirebase(uidOrUsername: string): Promise
   } catch (err) {
     console.warn('Failed to fetch user profile from Firebase:', err);
     return null;
+  }
+}
+
+// ======================== FEEDBACK & REPORTS ========================
+export async function saveFeedbackToFirebase(feedback: FeedbackItem): Promise<void> {
+  try {
+    const feedbackRef = doc(db, 'feedback', feedback.id);
+    await setDoc(feedbackRef, {
+      ...feedback,
+      submittedAt: Date.now(),
+    });
+  } catch (err) {
+    console.error('Failed to save feedback to Firebase:', err);
+    // Don't throw, let local UI continue gracefully
+  }
+}
+
+export async function reportReelInFirebase(
+  reelId: string,
+  reporterId: string,
+  reason: string
+): Promise<{ reportsCount: number; isAutoHidden: boolean }> {
+  try {
+    const reportDocId = `${reelId}_${reporterId}`;
+    await setDoc(doc(db, 'reel_reports', reportDocId), {
+      reelId,
+      reporterId,
+      reason,
+      reportedAt: Date.now(),
+    });
+
+    const reelRef = doc(db, 'reels', reelId);
+    const snap = await getDoc(reelRef);
+    const currentData = snap.exists() ? snap.data() : {};
+    const currentReports = (currentData.reportsCount || 0) + 1;
+    const isAutoHidden = currentReports >= 7;
+
+    await setDoc(
+      reelRef,
+      {
+        reportsCount: currentReports,
+        isAutoHidden,
+        updatedAt: Date.now(),
+      },
+      { merge: true }
+    );
+
+    return { reportsCount: currentReports, isAutoHidden };
+  } catch (err) {
+    console.warn('Failed to record reel report in Firebase:', err);
+    return { reportsCount: 1, isAutoHidden: false };
   }
 }

@@ -140,9 +140,8 @@ export const ShareSheetModal: React.FC<ShareSheetModalProps> = ({
   // 6. Facebook handler
   const handleFacebookShare = () => {
     playClickSound();
-    showToast('Opening Facebook... 🌐');
-    const fbUrl = `https://www.facebook.com/sharer/sharer.php?u=${encodeURIComponent(shareUrl)}`;
-    window.open(fbUrl, '_blank');
+    handleCopyLink();
+    showToast('Reel link copied! Ready to share on Facebook 🌐');
   };
 
   // 7. System / Native Web Share

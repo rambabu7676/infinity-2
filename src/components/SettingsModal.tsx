@@ -1,10 +1,30 @@
 import React, { useState } from 'react';
-import { X, Lock, Shield, BarChart3, Gem, LogOut, Check, Cloud, CheckCircle2, AlertCircle, Coins, Eye, CheckCheck } from 'lucide-react';
-import { playClickSound } from '../utils/audio';
+import {
+  X,
+  Lock,
+  Shield,
+  BarChart3,
+  Gem,
+  LogOut,
+  Check,
+  Cloud,
+  CheckCircle2,
+  AlertCircle,
+  Coins,
+  Eye,
+  CheckCheck,
+  MessageSquare,
+  Send,
+  Crown,
+  Sparkles,
+  Bug,
+  Lightbulb
+} from 'lucide-react';
+import { playClickSound, playWinChime } from '../utils/audio';
 import { getCloudinaryConfig, uploadMediaToCloudinary, CloudinaryUploadResult } from '../utils/cloudinary';
 import { getMonetizationStats } from '../utils/monetization';
-
-import { UserProfile } from '../types';
+import { saveFeedbackToFirebase } from '../firebase/services';
+import { UserProfile, FeedbackItem } from '../types';
 
 interface SettingsModalProps {
   isOpen: boolean;
@@ -15,6 +35,8 @@ interface SettingsModalProps {
   onTogglePrivacy: () => void;
   userProfile?: UserProfile;
   onOpenAuth?: () => void;
+  goldenThemeEnabled?: boolean;
+  onToggleGoldenTheme?: () => void;
 }
 
 export const SettingsModal: React.FC<SettingsModalProps> = ({
@@ -26,13 +48,29 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   onTogglePrivacy,
   userProfile,
   onOpenAuth,
+  goldenThemeEnabled = false,
+  onToggleGoldenTheme,
 }) => {
   const [activeSubModal, setActiveSubModal] = useState<
-    'privacy-policy' | 'daily-limits' | 'diamonds-rules' | 'cloudinary-settings' | 'creator-monetization' | null
+    'privacy-policy' | 'daily-limits' | 'diamonds-rules' | 'cloudinary-settings' | 'creator-monetization' | 'support-feedback' | null
   >(null);
   const [testResult, setTestResult] = useState<CloudinaryUploadResult | null>(null);
   const [testStatus, setTestStatus] = useState<'idle' | 'testing' | 'success' | 'error'>('idle');
   const [errorMessage, setErrorMessage] = useState('');
+
+  // Support & Feedback Form States
+  const [feedbackCategory, setFeedbackCategory] = useState<'bug' | 'feature' | 'general'>('general');
+  const [feedbackText, setFeedbackText] = useState('');
+  const [feedbackContact, setFeedbackContact] = useState(userProfile?.email || userProfile?.phone || '');
+  const [feedbackSending, setFeedbackSending] = useState(false);
+  const [feedbackSent, setFeedbackSent] = useState(false);
+
+  // Helper to count words (max 300 words)
+  const getWordCount = (str: string) => {
+    const trimmed = str.trim();
+    return trimmed ? trimmed.split(/\s+/).length : 0;
+  };
+  const wordCount = getWordCount(feedbackText);
 
   if (!isOpen) return null;
 
@@ -167,6 +205,59 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
             </div>
           </div>
 
+          {/* Royal Golden Look Switch (Step 3: Golden Look Toggle) */}
+          <div
+            onClick={() => {
+              playClickSound();
+              onToggleGoldenTheme?.();
+            }}
+            className="flex items-center justify-between p-3 rounded-xl hover:bg-zinc-800/80 cursor-pointer transition-colors"
+          >
+            <div className="flex items-center gap-3">
+              <Crown size={18} className="text-[#FFD700]" />
+              <div>
+                <div className="flex items-center gap-1.5">
+                  <span className="text-sm font-semibold text-white">✨ Royal Golden Look</span>
+                  <span className="text-[9px] bg-amber-500/20 text-[#FFD700] px-1.5 py-0.2 rounded font-bold">VIP</span>
+                </div>
+                <p className="text-[10px] text-zinc-400">
+                  {userProfile?.isPremium || (userProfile?.successfulReferrals || 0) >= 6
+                    ? 'गोल्डन यूआई थीम ऑन/ऑफ स्विच'
+                    : '6 सफल रेफरल पर 31 दिनों के लिए अनलॉक'}
+                </p>
+              </div>
+            </div>
+            <div
+              className={`w-10 h-5 rounded-full p-0.5 transition-colors ${
+                goldenThemeEnabled ? 'bg-gradient-to-r from-amber-500 to-[#FFD700]' : 'bg-zinc-700'
+              }`}
+            >
+              <div
+                className={`w-4 h-4 rounded-full bg-black transition-transform ${
+                  goldenThemeEnabled ? 'translate-x-5' : 'translate-x-0'
+                }`}
+              />
+            </div>
+          </div>
+
+          {/* INFINITY Support & Feedback (User Request Part 2) */}
+          <div
+            onClick={() => {
+              playClickSound();
+              setActiveSubModal('support-feedback');
+            }}
+            className="flex items-center gap-3 p-3 rounded-xl hover:bg-zinc-800/80 cursor-pointer transition-colors border border-cyan-500/20 bg-cyan-950/15"
+          >
+            <MessageSquare size={18} className="text-[#00E5FF]" />
+            <div className="flex-1">
+              <div className="flex items-center gap-2">
+                <span className="text-sm font-bold text-white">💬 Support &amp; Feedback</span>
+                <span className="text-[10px] bg-cyan-500/20 text-[#00E5FF] px-1.5 py-0.5 rounded font-bold">New</span>
+              </div>
+              <p className="text-[11px] text-zinc-400">बग रिपोर्ट, नया फीचर सुझाव या राय भेजें</p>
+            </div>
+          </div>
+
           {/* Cloudinary & Media Storage */}
           <div
             onClick={() => {
@@ -209,11 +300,12 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
           <div className="w-full max-w-sm bg-[#1A1A1A] border border-zinc-800 rounded-2xl p-5 space-y-3 shadow-2xl">
             <div className="flex items-center justify-between pb-2 border-b border-zinc-800">
               <h4 className="text-sm font-bold text-white">
-                {activeSubModal === 'privacy-policy' && '🛡️ Privacy Policy & Terms'}
+                {activeSubModal === 'privacy-policy' && '🛡️ Play Store Privacy Policy & Terms'}
                 {activeSubModal === 'daily-limits' && '📊 Daily Safety Limits'}
                 {activeSubModal === 'diamonds-rules' && '💎 Test Diamonds Rules'}
                 {activeSubModal === 'cloudinary-settings' && '☁️ Cloudinary Media Cloud'}
                 {activeSubModal === 'creator-monetization' && '💰 Creator Monetization & Anti-Bot'}
+                {activeSubModal === 'support-feedback' && '💬 Send Feedback & Report'}
               </h4>
               <button
                 onClick={() => setActiveSubModal(null)}
@@ -224,13 +316,46 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
             </div>
 
             {activeSubModal === 'privacy-policy' && (
-              <div className="text-xs text-zinc-300 space-y-2 leading-relaxed">
-                <p>
-                  Infinity protects user creators with zero data selling, encrypted media streaming, and strict anti-spam moderation.
-                </p>
-                <p>
-                  Content remains the intellectual property of the author. By posting reels, creators grant Infinity non-exclusive distribution on the network.
-                </p>
+              <div className="text-xs text-zinc-300 space-y-3 leading-relaxed max-h-[60vh] overflow-y-auto pr-1 no-scrollbar">
+                <div className="p-2.5 bg-zinc-900 rounded-xl border border-zinc-800 space-y-1">
+                  <p className="font-bold text-white text-xs">Infinity Social Platform - Privacy Policy</p>
+                  <p className="text-[10px] text-zinc-400">Effective Date: November 2026 · Play Store Compliant</p>
+                </div>
+
+                <div className="space-y-1">
+                  <p className="font-bold text-white">1. Information We Collect</p>
+                  <p className="text-zinc-400 text-[11px]">
+                    We collect user account identifiers (such as mobile number, verified Google account or email), optional profile details (display name, avatar, bio), and short videos/reels uploaded by the user.
+                  </p>
+                </div>
+
+                <div className="space-y-1">
+                  <p className="font-bold text-white">2. Device Permissions (Camera &amp; Audio)</p>
+                  <p className="text-zinc-400 text-[11px]">
+                    Camera and Microphone access are requested solely when recording reels, stories, or updating profile pictures. Media is uploaded securely to Cloudinary and Firebase servers and is never accessed without user intent.
+                  </p>
+                </div>
+
+                <div className="space-y-1">
+                  <p className="font-bold text-white">3. Zero Selling of Personal Data</p>
+                  <p className="text-zinc-400 text-[11px]">
+                    Infinity does NOT sell, rent, or trade your personal information to third-party data brokers. Authentication is protected via Google Firebase Auth with secure token encryption.
+                  </p>
+                </div>
+
+                <div className="space-y-1">
+                  <p className="font-bold text-white">4. Community Moderation &amp; 7-Report Rule</p>
+                  <p className="text-zinc-400 text-[11px]">
+                    To maintain family-safe content, any video that receives 7 or more community reports is automatically hidden from public discovery pending admin review.
+                  </p>
+                </div>
+
+                <div className="space-y-1">
+                  <p className="font-bold text-white">5. Developer &amp; Grievance Contact</p>
+                  <p className="text-zinc-400 text-[11px]">
+                    For privacy requests or account deletion, contact: <span className="text-[#00FF88] font-mono">support@infinity.app</span> or send a message via the in-app "Support &amp; Feedback" tool.
+                  </p>
+                </div>
               </div>
             )}
 
@@ -448,6 +573,174 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                     Status: <span className="text-[#00FF88] font-bold">Anti-Bot Shield Active (Beta)</span>
                   </span>
                 </div>
+              </div>
+            )}
+
+            {activeSubModal === 'support-feedback' && (
+              <div className="space-y-3">
+                {feedbackSent ? (
+                  <div className="p-4 bg-emerald-500/15 border border-emerald-500/40 rounded-2xl text-center space-y-2 animate-fadeIn">
+                    <CheckCircle2 size={32} className="text-[#00FF88] mx-auto" />
+                    <p className="text-sm font-bold text-white">धन्यवाद! आपका संदेश डेवलपर को भेज दिया गया है।</p>
+                    <p className="text-xs text-zinc-300">
+                      Infinity सपोर्ट टीम आपके सुझाव और रिपोर्ट को प्राथमिकता के साथ देखेगी।
+                    </p>
+                  </div>
+                ) : (
+                  <form
+                    onSubmit={async (e) => {
+                      e.preventDefault();
+                      if (!feedbackText.trim()) return;
+                      if (wordCount > 300) {
+                        alert('कृपया 300 शब्दों के भीतर लिखें। (Maximum 300 words limit).');
+                        return;
+                      }
+
+                      setFeedbackSending(true);
+                      playClickSound();
+
+                      try {
+                        const feedbackItem: FeedbackItem = {
+                          id: `fb_${Date.now()}`,
+                          category: feedbackCategory,
+                          message: feedbackText.trim(),
+                          userEmail: feedbackContact.trim() || userProfile?.email || userProfile?.phone || 'anonymous',
+                          username: userProfile?.username || 'user',
+                          timestamp: Date.now(),
+                          createdAt: new Date().toLocaleString(),
+                          deviceInfo: typeof navigator !== 'undefined' ? navigator.userAgent : 'Web Client',
+                        };
+
+                        await saveFeedbackToFirebase(feedbackItem);
+                        playWinChime();
+                        setFeedbackSending(false);
+                        setFeedbackSent(true);
+                        setTimeout(() => {
+                          setFeedbackSent(false);
+                          setFeedbackText('');
+                          setActiveSubModal(null);
+                        }, 2200);
+                      } catch (err) {
+                        setFeedbackSending(false);
+                        console.error('Feedback submit error:', err);
+                      }
+                    }}
+                    className="space-y-3"
+                  >
+                    {/* Category Selection Tabs */}
+                    <div>
+                      <label className="text-[11px] font-semibold text-zinc-300 block mb-1.5">
+                        श्रेणी चुनें (Select Category):
+                      </label>
+                      <div className="grid grid-cols-3 gap-1.5">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            playClickSound();
+                            setFeedbackCategory('bug');
+                          }}
+                          className={`py-2 px-1 rounded-xl text-[11px] font-bold border transition-all flex flex-col items-center gap-1 ${
+                            feedbackCategory === 'bug'
+                              ? 'bg-red-500/20 border-red-500 text-red-300'
+                              : 'bg-zinc-900 border-zinc-800 text-zinc-400 hover:text-white'
+                          }`}
+                        >
+                          <Bug size={14} className={feedbackCategory === 'bug' ? 'text-red-400' : 'text-zinc-500'} />
+                          <span className="truncate">🐛 Bug Report</span>
+                        </button>
+
+                        <button
+                          type="button"
+                          onClick={() => {
+                            playClickSound();
+                            setFeedbackCategory('feature');
+                          }}
+                          className={`py-2 px-1 rounded-xl text-[11px] font-bold border transition-all flex flex-col items-center gap-1 ${
+                            feedbackCategory === 'feature'
+                              ? 'bg-[#00E5FF]/20 border-[#00E5FF] text-[#00E5FF]'
+                              : 'bg-zinc-900 border-zinc-800 text-zinc-400 hover:text-white'
+                          }`}
+                        >
+                          <Lightbulb size={14} className={feedbackCategory === 'feature' ? 'text-[#00E5FF]' : 'text-zinc-500'} />
+                          <span className="truncate">✨ Feature Idea</span>
+                        </button>
+
+                        <button
+                          type="button"
+                          onClick={() => {
+                            playClickSound();
+                            setFeedbackCategory('general');
+                          }}
+                          className={`py-2 px-1 rounded-xl text-[11px] font-bold border transition-all flex flex-col items-center gap-1 ${
+                            feedbackCategory === 'general'
+                              ? 'bg-[#00FF88]/20 border-[#00FF88] text-[#00FF88]'
+                              : 'bg-zinc-900 border-zinc-800 text-zinc-400 hover:text-white'
+                          }`}
+                        >
+                          <Sparkles size={14} className={feedbackCategory === 'general' ? 'text-[#00FF88]' : 'text-zinc-500'} />
+                          <span className="truncate">💡 Feedback</span>
+                        </button>
+                      </div>
+                    </div>
+
+                    {/* Word Limit Textarea (Max 300 words) */}
+                    <div>
+                      <div className="flex items-center justify-between mb-1">
+                        <label className="text-[11px] font-semibold text-zinc-300">
+                          आपका संदेश (Your Message)
+                        </label>
+                        <span
+                          className={`text-[10px] font-mono font-bold ${
+                            wordCount > 300 ? 'text-red-400' : 'text-[#00FF88]'
+                          }`}
+                        >
+                          {wordCount} / 300 words
+                        </span>
+                      </div>
+                      <textarea
+                        rows={4}
+                        value={feedbackText}
+                        onChange={(e) => setFeedbackText(e.target.value)}
+                        placeholder="ऐप की कोई समस्या, सुझाव या राय खुलकर लिखें (अधिकतम 300 शब्द)..."
+                        required
+                        className="w-full p-2.5 bg-zinc-900 border border-zinc-800 rounded-xl text-xs text-white placeholder-zinc-500 focus:outline-none focus:border-[#00E5FF] resize-none"
+                      />
+                    </div>
+
+                    {/* Contact details */}
+                    <div>
+                      <label className="text-[11px] font-semibold text-zinc-300 block mb-1">
+                        ईमेल या मोबाइल नंबर (वैकल्पिक / Optional Contact)
+                      </label>
+                      <input
+                        type="text"
+                        value={feedbackContact}
+                        onChange={(e) => setFeedbackContact(e.target.value)}
+                        placeholder="जैसे: yourname@gmail.com या +91..."
+                        className="w-full px-3 py-2 bg-zinc-900 border border-zinc-800 rounded-xl text-xs text-white placeholder-zinc-500 focus:outline-none focus:border-[#00E5FF]"
+                      />
+                    </div>
+
+                    {/* Glowing Premium Blue/Emerald Button "Send to Developer" */}
+                    <button
+                      type="submit"
+                      disabled={feedbackSending || !feedbackText.trim() || wordCount > 300}
+                      className="w-full py-2.5 rounded-xl bg-gradient-to-r from-[#0095F6] via-[#00E5FF] to-[#00FF88] text-black font-extrabold text-xs flex items-center justify-center gap-2 shadow-[0_0_15px_rgba(0,229,255,0.35)] active:scale-95 transition-all disabled:opacity-50"
+                    >
+                      {feedbackSending ? (
+                        <>
+                          <div className="w-3.5 h-3.5 border-2 border-black border-t-transparent rounded-full animate-spin" />
+                          <span>भेजा जा रहा है...</span>
+                        </>
+                      ) : (
+                        <>
+                          <Send size={14} className="text-black" />
+                          <span>डेवलपर को भेजें (Send to Developer)</span>
+                        </>
+                      )}
+                    </button>
+                  </form>
+                )}
               </div>
             )}
 

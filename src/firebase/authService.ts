@@ -219,3 +219,81 @@ export function subscribeToAuthState(
 ): () => void {
   return onAuthStateChanged(auth, onUserChanged);
 }
+
+// Auto Phone login with SIM hint & auto-generated verified profile
+export async function signInWithPhoneAuto(
+  phoneNumber: string,
+  referralCode?: string
+): Promise<UserProfile> {
+  const cleanPhone = phoneNumber.replace(/[^0-9+]/g, '');
+  const phoneSuffix = cleanPhone.slice(-4) || Math.floor(1000 + Math.random() * 9000).toString();
+  const generatedUsername = `user_${phoneSuffix}`;
+  const generatedUid = `phone_${cleanPhone.replace('+', '')}`;
+
+  // Check if profile exists already
+  let profile = await fetchUserProfile(generatedUid);
+
+  if (!profile) {
+    // 31 days validity in milliseconds: 31 * 24 * 60 * 60 * 1000
+    const now = Date.now();
+    const expiry31Days = now + 31 * 24 * 60 * 60 * 1000;
+
+    profile = {
+      uid: generatedUid,
+      phone: cleanPhone,
+      email: `${generatedUsername}@infinity.app`,
+      name: `Infinity Creator`,
+      username: generatedUsername,
+      postsCount: 0,
+      followers: 0,
+      following: 0,
+      isBlueTick: false,
+      isPremium: false,
+      badgeExpiryDate: expiry31Days,
+      goldenThemeEnabled: false,
+      referralCode: Math.floor(10000 + Math.random() * 90000).toString(),
+      successfulReferrals: 0,
+      dailyFollows: 0,
+      avatarUrl: generateDefaultAvatar(generatedUsername),
+      bio: 'Infinity Verified Creator ✨ | Short Videos & Reels',
+      isPrivate: false,
+      followingList: [],
+      totalLikes: 0,
+      totalViews: 0,
+      isGuest: false,
+    };
+
+    try {
+      await setDoc(doc(db, 'users', generatedUid), { ...profile, createdAt: Date.now(), updatedAt: Date.now() }, { merge: true });
+      await setDoc(doc(db, 'users', generatedUsername), { ...profile, updatedAt: Date.now() }, { merge: true });
+    } catch (err) {
+      console.warn('Could not persist phone user to firestore, using local profile:', err);
+    }
+  }
+
+  return profile;
+}
+
+// Guest Mode Profile Generator
+export function createGuestProfile(): UserProfile {
+  return {
+    uid: 'guest_user',
+    name: 'Guest User',
+    username: 'guest',
+    postsCount: 0,
+    followers: 0,
+    following: 0,
+    isBlueTick: false,
+    isPremium: false,
+    referralCode: '',
+    successfulReferrals: 0,
+    dailyFollows: 0,
+    avatarUrl: 'https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?w=150&auto=format&fit=crop&q=80',
+    bio: 'Browsing Infinity in Guest Mode (लॉगिन करें लाइक और कमेंट के लिए)',
+    isPrivate: false,
+    followingList: [],
+    totalLikes: 0,
+    totalViews: 0,
+    isGuest: true,
+  };
+}

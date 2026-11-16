@@ -29,6 +29,10 @@ export interface ReelItem {
   commentsList: ReelComment[];
   timestamp?: number; // epoch ms for recency sorting
   createdAt?: string;
+  reportsCount?: number; // Community reports (Auto-hides if >= 7)
+  isAutoHidden?: boolean; // Hidden from public feed if reported >= 7 times
+  dislikesCount?: number;
+  isDisliked?: boolean;
   cloudinary?: {
     publicId: string;
     resourceType: 'video' | 'image';
@@ -47,6 +51,7 @@ export interface ReelItem {
 export interface UserProfile {
   uid?: string;
   email?: string;
+  phone?: string;
   name: string;
   username: string; // Max 20 Chars
   postsCount: number;
@@ -54,6 +59,8 @@ export interface UserProfile {
   following: number;
   isBlueTick: boolean;
   isPremium: boolean;
+  badgeExpiryDate?: number; // 31-day validity timestamp
+  goldenThemeEnabled?: boolean; // On/Off switch for golden profile theme
   referralCode: string;
   successfulReferrals: number;
   dailyFollows: number;
@@ -63,6 +70,18 @@ export interface UserProfile {
   followingList?: string[]; // list of usernames followed by the user
   totalLikes?: number;
   totalViews?: number;
+  isGuest?: boolean;
+}
+
+export interface FeedbackItem {
+  id: string;
+  category: 'bug' | 'feature' | 'general';
+  message: string;
+  userEmail?: string;
+  username?: string;
+  timestamp: number;
+  createdAt: string;
+  deviceInfo?: string;
 }
 
 export interface StorySlide {

@@ -85,9 +85,40 @@
         "diamonds": { "type": "number" },
         "isBlueTick": { "type": "boolean" },
         "isPremium": { "type": "boolean" },
-        "followingList": { "type": "array" }
+        "followingList": { "type": "array" },
+        "phone": { "type": "string" },
+        "badgeExpiryDate": { "type": "number" },
+        "goldenThemeEnabled": { "type": "boolean" },
+        "isGuest": { "type": "boolean" }
       },
       "required": ["name", "username"]
+    },
+    "Feedback": {
+      "title": "Feedback",
+      "description": "In-app user bug reports, feature requests, and general feedback",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "category": { "type": "string", "enum": ["bug", "feature", "general"] },
+        "message": { "type": "string", "maxLength": 3000 },
+        "contactInfo": { "type": "string" },
+        "username": { "type": "string" },
+        "uid": { "type": "string" },
+        "timestamp": { "type": "number" }
+      },
+      "required": ["id", "category", "message", "username"]
+    },
+    "ReelReport": {
+      "title": "ReelReport",
+      "description": "Moderation report submitted for a reel (7 reports trigger auto-hide)",
+      "type": "object",
+      "properties": {
+        "reelId": { "type": "string" },
+        "reporterId": { "type": "string" },
+        "reason": { "type": "string" },
+        "reportedAt": { "type": "number" }
+      },
+      "required": ["reelId", "reporterId", "reason"]
     }
   },
   "firestore": {
@@ -106,6 +137,14 @@
     "/users/{userId}": {
       "schema": "UserProfile",
       "description": "User profiles collection"
+    },
+    "/feedback/{feedbackId}": {
+      "schema": "Feedback",
+      "description": "In-app user feedback and bug reports collection"
+    },
+    "/reel_reports/{reportId}": {
+      "schema": "ReelReport",
+      "description": "Reel moderation reports collection"
     }
   }
 }
