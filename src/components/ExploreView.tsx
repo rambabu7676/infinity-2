@@ -1,16 +1,41 @@
-import React, { useState } from 'react';
-import { Search, Play, Eye, Flame, Music2, Sparkles, X } from 'lucide-react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
+import { Search, Play, Eye, X, WifiOff } from 'lucide-react';
 import { ReelItem } from '../types';
 import { playClickSound } from '../utils/audio';
+import { usePullToRefresh, RefreshResultStatus } from '../hooks/usePullToRefresh';
+import {
+  getNetworkSpeedTier,
+  subscribeToNetworkSpeedChange,
+  getAdaptiveThumbnailUrl,
+  getAdaptiveVideoUrl,
+  NetworkSpeedTier,
+} from '../utils/cloudinary';
 
 interface ExploreViewProps {
   reels: ReelItem[];
   onSelectReel: (reel: ReelItem) => void;
+  onRefreshFeed?: () => Promise<RefreshResultStatus>;
 }
 
-export const ExploreView: React.FC<ExploreViewProps> = ({ reels, onSelectReel }) => {
+const PAGE_SIZE = 12;
+
+export const ExploreView: React.FC<ExploreViewProps> = ({
+  reels,
+  onSelectReel,
+  onRefreshFeed,
+}) => {
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedTag, setSelectedTag] = useState('All');
+  const [visibleCount, setVisibleCount] = useState(PAGE_SIZE);
+  const [networkTier, setNetworkTier] = useState<NetworkSpeedTier>(() => getNetworkSpeedTier());
+
+  const scrollContainerRef = useRef<HTMLDivElement>(null);
+  const loadMoreSentinelRef = useRef<HTMLDivElement>(null);
+
+  const { pullDistance, isRefreshing, offlineError, pullHandlers } = usePullToRefresh({
+    containerRef: scrollContainerRef,
+    onRefresh: onRefreshFeed,
+  });
 
   const tags = ['All', 'Trending 🔥', 'Dance ⚡️', 'Food 🍲', 'Music 🎧', 'Comedy 😂', 'Art ✨'];
 
@@ -27,8 +52,57 @@ export const ExploreView: React.FC<ExploreViewProps> = ({ reels, onSelectReel })
     return matchesSearch;
   });
 
+  const visibleReels = filteredReels.slice(0, visibleCount);
+  const hasMore = visibleCount < filteredReels.length;
+
+  // Listen to internet speed changes
+  useEffect(() => {
+    return subscribeToNetworkSpeedChange(setNetworkTier);
+  }, []);
+
+  // Reset to initial 12 items when filter/search changes
+  useEffect(() => {
+    setVisibleCount(PAGE_SIZE);
+  }, [searchQuery, selectedTag]);
+
+  const loadMoreItems = useCallback(() => {
+    setVisibleCount((prev) => {
+      if (prev >= filteredReels.length) return prev;
+      return Math.min(filteredReels.length, prev + PAGE_SIZE);
+    });
+  }, [filteredReels.length]);
+
+  // Infinite scroll using IntersectionObserver
+  useEffect(() => {
+    if (!hasMore || !loadMoreSentinelRef.current) return;
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries[0]?.isIntersecting) {
+          loadMoreItems();
+        }
+      },
+      { root: null, rootMargin: '200px' }
+    );
+    observer.observe(loadMoreSentinelRef.current);
+    return () => observer.disconnect();
+  }, [hasMore, loadMoreItems, visibleCount]);
+
+  // Backup scroll listener for inner scroll container
+  const handleScroll = (e: React.UIEvent<HTMLDivElement>) => {
+    if (!hasMore) return;
+    const el = e.currentTarget;
+    if (el.scrollTop + el.clientHeight >= el.scrollHeight - 200) {
+      loadMoreItems();
+    }
+  };
+
   return (
-    <div className="flex-1 flex flex-col bg-black text-white overflow-y-auto no-scrollbar pb-16">
+    <div
+      ref={scrollContainerRef}
+      onScroll={handleScroll}
+      {...pullHandlers}
+      className="flex-1 flex flex-col bg-black text-white overflow-y-auto overscroll-y-contain no-scrollbar pb-16 select-none"
+    >
       {/* Top Search Bar */}
       <div className="p-3 sticky top-0 bg-black/95 backdrop-blur-md z-20 border-b border-zinc-900">
         <div className="flex items-center gap-2 bg-[#1A1A1A] rounded-xl px-3 py-2 border border-zinc-800">
@@ -68,26 +142,60 @@ export const ExploreView: React.FC<ExploreViewProps> = ({ reels, onSelectReel })
         </div>
       </div>
 
+      {/* Pull-to-Refresh Green Spinner & Offline Notice */}
+      {(pullDistance > 4 || isRefreshing) && (
+        <div
+          className="w-full flex items-center justify-center overflow-hidden transition-all duration-150 shrink-0"
+          style={{ height: `${isRefreshing ? 44 : Math.max(24, Math.round(pullDistance * 0.65))}px` }}
+          aria-live="polite"
+        >
+          <div
+            className={`w-6 h-6 rounded-full border-[2.5px] border-[#00FF88]/25 border-t-[#00FF88] ${
+              isRefreshing ? 'animate-spin' : ''
+            }`}
+            style={
+              isRefreshing
+                ? undefined
+                : { transform: `rotate(${Math.round(pullDistance * 4)}deg)` }
+            }
+          />
+        </div>
+      )}
+      {offlineError && !isRefreshing && (
+        <div className="mx-auto mt-2 mb-1.5 px-3 py-1 rounded-full bg-zinc-900/95 border border-zinc-700/80 text-zinc-200 text-[11px] font-semibold flex items-center justify-center gap-1.5 shadow-md animate-fadeIn">
+          <WifiOff size={12} className="text-amber-400 shrink-0" />
+          <span>इंटरनेट जाँचें</span>
+        </div>
+      )}
+
       {/* 3-Column Discover Grid (Tight 1px Instagram Search Feed Layout) */}
       <div className="grid grid-cols-3 gap-[1px] p-0 flex-1 bg-black">
-        {filteredReels.map((item, idx) => {
+        {visibleReels.map((item, idx) => {
           // Dynamic tile sizing: featured tiles or standard square
           const isLarge = idx % 7 === 1;
+          const thumbnailSrc = getAdaptiveThumbnailUrl(item.posterUrl || item.videoUrl, networkTier);
 
           return (
             <div
               key={item.id}
               onClick={() => {
                 playClickSound();
-                onSelectReel(item);
+                onSelectReel({
+                  ...item,
+                  videoUrl: getAdaptiveVideoUrl(item.videoUrl, networkTier),
+                  posterUrl: thumbnailSrc,
+                });
               }}
               className={`relative bg-zinc-950 overflow-hidden cursor-pointer group select-none active:opacity-90 transition-opacity ${
                 isLarge ? 'row-span-2 col-span-1 aspect-[9/19]' : 'aspect-square'
               }`}
             >
+              {/* Thumbnail Image Only (Video loads & plays only after user tap) */}
               <img
-                src={item.posterUrl}
+                src={thumbnailSrc}
                 alt={item.title}
+                loading="lazy"
+                decoding="async"
                 className="w-full h-full object-cover group-hover:scale-102 transition-transform duration-200"
               />
 
@@ -107,6 +215,9 @@ export const ExploreView: React.FC<ExploreViewProps> = ({ reels, onSelectReel })
           );
         })}
       </div>
+
+      {/* Infinite Scroll Sentinel */}
+      {hasMore && <div ref={loadMoreSentinelRef} className="h-6 w-full shrink-0" aria-hidden="true" />}
     </div>
   );
 };

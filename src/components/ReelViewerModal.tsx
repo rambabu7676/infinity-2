@@ -23,12 +23,16 @@ import {
   AlertTriangle,
   Flag,
   LogIn,
+  Ban,
+  Pencil,
+  Trash2,
 } from 'lucide-react';
 import { ReelItem } from '../types';
 import { playClickSound, playLikePop } from '../utils/audio';
 import { ShareSheetModal } from './ShareSheetModal';
 import { sanitizeComment, VOICE_SUGGESTIONS } from '../utils/moderation';
 import { recordVerifiedReelView } from '../utils/monetization';
+import { useLanguage } from '../i18n/LanguageContext';
 
 interface ReelViewerModalProps {
   reels: ReelItem[];
@@ -45,6 +49,13 @@ interface ReelViewerModalProps {
   onDislikeReel?: (reelId: string) => void;
   isGuest?: boolean;
   onOpenAuth?: () => void;
+  currentUsername?: string;
+  currentUserUid?: string;
+  blockedUsernames?: string[];
+  blockedByUsernames?: string[];
+  onBlockUser?: (target: { username: string; avatarUrl?: string }) => Promise<void> | void;
+  onEditReelCaption?: (reelId: string, newCaption: string) => Promise<{ success: boolean; error?: string }>;
+  onDeleteReel?: (reelId: string) => Promise<{ success: boolean; error?: string }>;
 }
 
 export const ReelViewerModal: React.FC<ReelViewerModalProps> = ({
@@ -62,7 +73,15 @@ export const ReelViewerModal: React.FC<ReelViewerModalProps> = ({
   onDislikeReel,
   isGuest = false,
   onOpenAuth,
+  currentUsername = '',
+  currentUserUid = '',
+  blockedUsernames = [],
+  blockedByUsernames = [],
+  onBlockUser,
+  onEditReelCaption,
+  onDeleteReel,
 }) => {
+  const { t } = useLanguage();
   // Video playback states
   const [isPlaying, setIsPlaying] = useState(true);
   const [isMuted, setIsMuted] = useState(false);
@@ -77,9 +96,23 @@ export const ReelViewerModal: React.FC<ReelViewerModalProps> = ({
 
   // 🚨 Report & Safety System
   const [showReportModal, setShowReportModal] = useState(false);
-  const [selectedReportReason, setSelectedReportReason] = useState('🚫 स्पैम या भ्रामक सामग्री (Spam or Misleading)');
+  const [selectedReportReasonIdx, setSelectedReportReasonIdx] = useState(0);
+  const selectedReportReason =
+    t.reelViewer.reportModal.reasons[selectedReportReasonIdx] ||
+    t.reelViewer.reportModal.reasons[0];
   const [reportSubmitted, setReportSubmitted] = useState(false);
   const [guestAlert, setGuestAlert] = useState<string | null>(null);
+  const [showBlockConfirm, setShowBlockConfirm] = useState(false);
+  const [isBlockingUser, setIsBlockingUser] = useState(false);
+
+  // Edit Caption & Delete Reel States (Owner-Only)
+  const [showEditCaptionModal, setShowEditCaptionModal] = useState(false);
+  const [captionDraft, setCaptionDraft] = useState('');
+  const [isSavingCaption, setIsSavingCaption] = useState(false);
+  const [captionEditError, setCaptionEditError] = useState<string | null>(null);
+  const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
+  const [isDeletingReel, setIsDeletingReel] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
 
   // Comment input state
   const [commentInput, setCommentInput] = useState('');
@@ -97,6 +130,11 @@ export const ReelViewerModal: React.FC<ReelViewerModalProps> = ({
 
   // Video element setup & auto-play
   useEffect(() => {
+    setShowEditCaptionModal(false);
+    setCaptionEditError(null);
+    setShowDeleteConfirm(false);
+    setDeleteError(null);
+    setShowMoreMenu(false);
     if (currentReel && videoRef.current) {
       videoRef.current.currentTime = 0;
       videoRef.current.play().catch(() => {
@@ -137,7 +175,15 @@ export const ReelViewerModal: React.FC<ReelViewerModalProps> = ({
   // Keyboard navigation (Arrow Up / Down, M for mute)
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      if (showCommentsDrawer || showShareModal || showMoreMenu) return;
+      if (
+        showCommentsDrawer ||
+        showShareModal ||
+        showMoreMenu ||
+        showBlockConfirm ||
+        showEditCaptionModal ||
+        showDeleteConfirm
+      )
+        return;
       if (e.key === 'ArrowDown') {
         e.preventDefault();
         handleNextReel();
@@ -150,7 +196,16 @@ export const ReelViewerModal: React.FC<ReelViewerModalProps> = ({
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [currentIndex, reels, showCommentsDrawer, showShareModal, showMoreMenu]);
+  }, [
+    currentIndex,
+    reels,
+    showCommentsDrawer,
+    showShareModal,
+    showMoreMenu,
+    showBlockConfirm,
+    showEditCaptionModal,
+    showDeleteConfirm,
+  ]);
 
   // Mouse wheel scroll to next / prev reel
   const lastScrollTime = useRef<number>(0);
@@ -211,7 +266,7 @@ export const ReelViewerModal: React.FC<ReelViewerModalProps> = ({
   // Guest Mode guard helper
   const checkGuestRestricted = (actionName: string): boolean => {
     if (isGuest) {
-      setGuestAlert(`रील्स ${actionName} करने के लिए कृपया पहले लॉगिन करें! (Login required to ${actionName})`);
+      setGuestAlert(t.reelViewer.guestActionAlert(actionName));
       setTimeout(() => setGuestAlert(null), 3500);
       return true;
     }
@@ -226,7 +281,7 @@ export const ReelViewerModal: React.FC<ReelViewerModalProps> = ({
       clickTimeoutRef.current = null;
     }
 
-    if (checkGuestRestricted('लाइक')) return;
+    if (checkGuestRestricted(t.reelViewer.likeAction)) return;
 
     if (currentReel && !currentReel.isLiked) {
       playLikePop();
@@ -292,7 +347,7 @@ export const ReelViewerModal: React.FC<ReelViewerModalProps> = ({
     if (!SpeechRecognitionAPI) {
       const sample = VOICE_SUGGESTIONS[Math.floor(Math.random() * VOICE_SUGGESTIONS.length)];
       setCommentInput((prev) => (prev ? `${prev} ${sample}` : sample));
-      setModerationNotice('🎙️ Voice suggestion added! (Browser voice-typing fallback)');
+      setModerationNotice(t.reelViewer.voiceFallbackNotice);
       setTimeout(() => setModerationNotice(null), 3000);
       return;
     }
@@ -338,7 +393,7 @@ export const ReelViewerModal: React.FC<ReelViewerModalProps> = ({
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       recognition.onerror = (event: any) => {
         if (event.error === 'not-allowed') {
-          setModerationNotice('⚠️ Microphone permission required for voice typing');
+          setModerationNotice(t.reelViewer.micPermissionNotice);
           setTimeout(() => setModerationNotice(null), 3500);
         }
         stopVoiceTyping();
@@ -354,15 +409,26 @@ export const ReelViewerModal: React.FC<ReelViewerModalProps> = ({
     } catch {
       const sample = VOICE_SUGGESTIONS[Math.floor(Math.random() * VOICE_SUGGESTIONS.length)];
       setCommentInput((prev) => (prev ? `${prev} ${sample}` : sample));
-      setModerationNotice('🎙️ Voice suggestion added!');
+      setModerationNotice(t.reelViewer.voiceAddedNotice);
       setTimeout(() => setModerationNotice(null), 2500);
     }
   };
 
+  const allBlockedSet = new Set<string>([...blockedUsernames, ...blockedByUsernames]);
+
   const handleSendComment = (e?: React.FormEvent) => {
     if (e) e.preventDefault();
     if (!currentReel) return;
-    if (checkGuestRestricted('कमेंट')) return;
+    if (isGuest) {
+      setGuestAlert(t.reelViewer.guestCommentAlert);
+      setTimeout(() => setGuestAlert(null), 3500);
+      return;
+    }
+    if (allBlockedSet.has(currentReel.user)) {
+      setModerationNotice(t.reelViewer.blockedCommentNotice);
+      setTimeout(() => setModerationNotice(null), 3000);
+      return;
+    }
     const rawText = (commentInput + (interimText ? ` ${interimText}` : '')).trim();
     if (!rawText) return;
 
@@ -370,7 +436,7 @@ export const ReelViewerModal: React.FC<ReelViewerModalProps> = ({
     const { cleanedText, hasAbuse } = sanitizeComment(rawText);
 
     if (hasAbuse) {
-      setModerationNotice('🛡️ अभद्र भाषा फिल्टर की गई (Filtered abusive language)');
+      setModerationNotice(t.reelViewer.abuseFilteredNotice);
       setTimeout(() => setModerationNotice(null), 3000);
     }
 
@@ -382,6 +448,22 @@ export const ReelViewerModal: React.FC<ReelViewerModalProps> = ({
   };
 
   if (!currentReel) return null;
+
+  const isReelAuthorBlocked = allBlockedSet.has(currentReel.user);
+  const isOwnReel = Boolean(
+    !isGuest &&
+      currentReel &&
+      (currentReel.uid
+        ? Boolean(currentUserUid && currentReel.uid === currentUserUid)
+        : Boolean(currentUsername && currentReel.user === currentUsername))
+  );
+  const isImageMedia = Boolean(
+    currentReel.cloudinary?.resourceType === 'image' ||
+      /\.(jpg|jpeg|png|webp|gif)(\?|$)/i.test(currentReel.videoUrl || '')
+  );
+  const visibleComments = (currentReel.commentsList || []).filter(
+    (c) => !allBlockedSet.has(c.user)
+  );
 
   return (
     <div
@@ -395,20 +477,28 @@ export const ReelViewerModal: React.FC<ReelViewerModalProps> = ({
         {/* ================= 1. VIDEO LAYER ================= */}
         <div
           className="absolute inset-0 bg-zinc-950 flex items-center justify-center cursor-pointer"
-          onClick={handleVideoClick}
+          onClick={isImageMedia ? undefined : handleVideoClick}
           onDoubleClick={handleDoubleTap}
         >
           {currentReel.videoUrl ? (
-            <video
-              ref={videoRef}
-              src={currentReel.videoUrl}
-              poster={currentReel.posterUrl || undefined}
-              loop
-              muted={isMuted}
-              playsInline
-              autoPlay
-              className="w-full h-full object-cover"
-            />
+            isImageMedia ? (
+              <img
+                src={currentReel.videoUrl}
+                alt={currentReel.title}
+                className="w-full h-full object-cover"
+              />
+            ) : (
+              <video
+                ref={videoRef}
+                src={currentReel.videoUrl}
+                poster={currentReel.posterUrl || undefined}
+                loop
+                muted={isMuted}
+                playsInline
+                autoPlay
+                className="w-full h-full object-cover"
+              />
+            )
           ) : null}
 
           {/* Clean gradient overlay for text readability without obscuring video */}
@@ -435,8 +525,8 @@ export const ReelViewerModal: React.FC<ReelViewerModalProps> = ({
           <button
             onClick={onClose}
             className="p-2 -ml-1 text-white hover:text-[#00FF88] transition-colors rounded-full bg-black/30 backdrop-blur-md active:scale-95 drop-shadow-md"
-            title="Back to Feed"
-            aria-label="Back"
+            title={t.reelViewer.backTitle}
+            aria-label={t.reelViewer.backTitle}
           >
             <ChevronLeft size={24} strokeWidth={2.5} />
           </button>
@@ -444,7 +534,7 @@ export const ReelViewerModal: React.FC<ReelViewerModalProps> = ({
           {/* Reels Title */}
           <div className="flex items-center gap-1.5 bg-black/40 backdrop-blur-md px-3 py-1 rounded-full border border-white/10 drop-shadow-md">
             <span className="w-2 h-2 rounded-full bg-[#00FF88] animate-pulse" />
-            <span className="text-white text-xs font-bold tracking-wide">Infinity Reels</span>
+            <span className="text-white text-xs font-bold tracking-wide">{t.reelViewer.headerTitle}</span>
           </div>
 
           {/* Right Controls: Permanent Volume Button & Spin Button */}
@@ -457,8 +547,8 @@ export const ReelViewerModal: React.FC<ReelViewerModalProps> = ({
                   ? 'bg-rose-500/20 border-rose-500/40 text-rose-400'
                   : 'bg-black/40 border-white/15 text-white hover:text-[#00FF88]'
               }`}
-              title={isMuted ? 'Unmute Sound' : 'Mute Sound'}
-              aria-label="Toggle Mute"
+              title={isMuted ? t.reelViewer.unmuteSound : t.reelViewer.muteSound}
+              aria-label={isMuted ? t.reelViewer.unmuteSound : t.reelViewer.muteSound}
             >
               {isMuted ? (
                 <VolumeX size={18} strokeWidth={2.2} />
@@ -471,8 +561,8 @@ export const ReelViewerModal: React.FC<ReelViewerModalProps> = ({
             <button
               onClick={onOpenSpin}
               className="p-1.5 rounded-full bg-gradient-to-tr from-amber-400 to-emerald-400 text-black font-extrabold transition-transform hover:scale-105 active:scale-95 shadow-md"
-              title="Spin & Win Diamonds"
-              aria-label="Spin Wheel"
+              title={t.reelViewer.spinTitle}
+              aria-label={t.reelViewer.spinTitle}
             >
               <Sparkles size={17} strokeWidth={2.5} />
             </button>
@@ -484,7 +574,7 @@ export const ReelViewerModal: React.FC<ReelViewerModalProps> = ({
           <div className="relative z-30 mx-3 mt-1 p-2 rounded-xl bg-rose-950/85 border border-rose-500/60 backdrop-blur-md flex items-center gap-2 text-rose-200 shadow-lg animate-fadeIn">
             <AlertTriangle size={16} className="text-rose-400 shrink-0" />
             <div className="text-[11px] leading-snug">
-              <span className="font-bold text-white">⚠️ जांच के अधीन (Under Admin Review):</span> 7 या अधिक रिपोर्ट्स मिलने के कारण यह वीडियो सामान्य डिस्कवरी से स्वतः हाइड कर दिया गया है।
+              <span className="font-bold text-white">{t.reelViewer.autoHiddenLabel}</span> {t.reelViewer.autoHiddenDesc}
             </div>
           </div>
         )}
@@ -504,7 +594,7 @@ export const ReelViewerModal: React.FC<ReelViewerModalProps> = ({
               className="px-2.5 py-1 bg-gradient-to-r from-amber-400 to-[#00FF88] text-black font-bold text-[11px] rounded-lg flex items-center gap-1 shrink-0 active:scale-95 shadow-sm"
             >
               <LogIn size={11} />
-              <span>लॉगिन</span>
+              <span>{t.reelViewer.loginBtn}</span>
             </button>
           </div>
         )}
@@ -515,7 +605,7 @@ export const ReelViewerModal: React.FC<ReelViewerModalProps> = ({
           <button
             onClick={(e) => {
               e.stopPropagation();
-              if (checkGuestRestricted('लाइक')) return;
+              if (checkGuestRestricted(t.reelViewer.likeAction)) return;
               playLikePop();
               onToggleLike(currentReel.id);
               if (!currentReel.isLiked) {
@@ -524,8 +614,8 @@ export const ReelViewerModal: React.FC<ReelViewerModalProps> = ({
               }
             }}
             className="flex flex-col items-center gap-1 group focus:outline-none cursor-pointer"
-            title="Like"
-            aria-label="Like reel"
+            title={t.reelViewer.likeBtnTitle}
+            aria-label={t.reelViewer.likeBtnTitle}
           >
             <div className="transition-transform active:scale-130 group-hover:scale-110 duration-150">
               <Heart
@@ -550,8 +640,8 @@ export const ReelViewerModal: React.FC<ReelViewerModalProps> = ({
               setShowCommentsDrawer(true);
             }}
             className="flex flex-col items-center gap-1 group focus:outline-none cursor-pointer"
-            title="Comment"
-            aria-label="View comments"
+            title={t.reelViewer.commentBtnTitle}
+            aria-label={t.reelViewer.commentBtnTitle}
           >
             <div className="transition-transform active:scale-120 group-hover:scale-110 duration-150">
               <MessageCircle
@@ -572,8 +662,8 @@ export const ReelViewerModal: React.FC<ReelViewerModalProps> = ({
               setShowShareModal(true);
             }}
             className="flex flex-col items-center gap-1 group focus:outline-none cursor-pointer"
-            title="Share"
-            aria-label="Share reel"
+            title={t.reelViewer.shareBtnTitle}
+            aria-label={t.reelViewer.shareBtnTitle}
           >
             <div className="transition-transform active:scale-120 group-hover:scale-110 duration-150">
               <Share2
@@ -590,13 +680,17 @@ export const ReelViewerModal: React.FC<ReelViewerModalProps> = ({
           <button
             onClick={(e) => {
               e.stopPropagation();
-              if (checkGuestRestricted('सेव')) return;
+              if (isGuest) {
+                setGuestAlert(t.reelViewer.guestSaveAlert);
+                setTimeout(() => setGuestAlert(null), 3500);
+                return;
+              }
               playClickSound();
               onToggleSave(currentReel.id);
             }}
             className="flex flex-col items-center gap-1 group focus:outline-none cursor-pointer"
-            title="Save"
-            aria-label="Save reel"
+            title={t.reelViewer.saveBtnTitle}
+            aria-label={t.reelViewer.saveBtnTitle}
           >
             <div className="transition-transform active:scale-120 group-hover:scale-110 duration-150">
               <Bookmark
@@ -618,8 +712,8 @@ export const ReelViewerModal: React.FC<ReelViewerModalProps> = ({
               setShowMoreMenu(true);
             }}
             className="text-white hover:text-zinc-200 transition-transform active:scale-120 duration-150 drop-shadow-[0_2px_8px_rgba(0,0,0,0.8)] cursor-pointer"
-            title="More Options"
-            aria-label="More options"
+            title={t.reelViewer.moreBtnTitle}
+            aria-label={t.reelViewer.moreBtnTitle}
           >
             <MoreHorizontal size={24} strokeWidth={2.4} />
           </button>
@@ -631,7 +725,7 @@ export const ReelViewerModal: React.FC<ReelViewerModalProps> = ({
               playClickSound();
             }}
             className="mt-1 w-8 h-8 rounded-full border-2 border-zinc-700 bg-black flex items-center justify-center shadow-lg cursor-pointer overflow-hidden group hover:scale-105 transition-transform"
-            title={currentReel.soundTitle || 'Original Audio'}
+            title={currentReel.soundTitle || t.reelViewer.originalAudio}
           >
             <div className="w-full h-full rounded-full animate-spin [animation-duration:5s] flex items-center justify-center bg-gradient-to-tr from-zinc-900 to-zinc-800">
               <img
@@ -663,7 +757,7 @@ export const ReelViewerModal: React.FC<ReelViewerModalProps> = ({
             <button
               onClick={(e) => {
                 e.stopPropagation();
-                if (checkGuestRestricted('फॉलो')) return;
+                if (checkGuestRestricted(t.reelViewer.followAction)) return;
                 onToggleFollow(currentReel.user);
               }}
               className={`ml-1 px-3 py-1 text-xs font-semibold rounded-full border transition-all active:scale-95 shadow-sm ${
@@ -672,7 +766,7 @@ export const ReelViewerModal: React.FC<ReelViewerModalProps> = ({
                   : 'bg-[#00FF88] border-[#00FF88] text-black font-bold hover:bg-[#00e57a]'
               }`}
             >
-              {currentReel.isFollowing ? 'Following' : 'Follow'}
+              {currentReel.isFollowing ? t.reelViewer.followingBtn : t.reelViewer.followBtn}
             </button>
           </div>
 
@@ -698,11 +792,11 @@ export const ReelViewerModal: React.FC<ReelViewerModalProps> = ({
               <div className="flex items-center justify-between pb-3 border-b border-zinc-800">
                 <div className="flex items-center gap-2">
                   <span className="text-sm font-bold text-white">
-                    Comments ({currentReel.commentsList?.length || 0})
+                    {t.reelViewer.commentsHeader(visibleComments.length)}
                   </span>
                   <span className="text-[10px] text-zinc-400 bg-zinc-800 px-2 py-0.5 rounded-full flex items-center gap-1">
                     <ShieldCheck size={11} className="text-[#00FF88]" />
-                    <span>Safe Moderation</span>
+                    <span>{t.reelViewer.safeModeration}</span>
                   </span>
                 </div>
                 <button
@@ -726,8 +820,8 @@ export const ReelViewerModal: React.FC<ReelViewerModalProps> = ({
 
               {/* Comments List */}
               <div className="flex-1 overflow-y-auto py-3 space-y-3">
-                {currentReel.commentsList && currentReel.commentsList.length > 0 ? (
-                  currentReel.commentsList.map((c) => (
+                {visibleComments.length > 0 ? (
+                  visibleComments.map((c) => (
                     <div key={c.id} className="flex items-start gap-2.5 text-xs">
                       <img
                         src={c.avatar}
@@ -750,114 +844,135 @@ export const ReelViewerModal: React.FC<ReelViewerModalProps> = ({
                 ) : (
                   <div className="text-center py-8">
                     <p className="text-xs text-zinc-500">
-                      No comments yet. Be the first to leave a comment!
-                    </p>
-                    <p className="text-[11px] text-zinc-600 mt-1">
-                      Tap 🎙️ below to speak in Hindi or English.
+                      {t.reelViewer.noCommentsYet}
                     </p>
                   </div>
                 )}
               </div>
 
-              {/* Quick Voice Suggestions */}
-              <div className="py-2 border-t border-zinc-800/80 flex items-center gap-1.5 overflow-x-auto no-scrollbar">
-                <span className="text-[10px] text-zinc-500 shrink-0 flex items-center gap-1">
-                  <Sparkles size={11} className="text-[#00FF88]" />
-                  <span>Quick:</span>
-                </span>
-                {VOICE_SUGGESTIONS.map((suggestion, idx) => (
+              {isGuest ? (
+                <div className="pt-3 border-t border-zinc-800 flex items-center justify-between gap-3">
+                  <p className="text-xs font-medium text-amber-200">{t.reelViewer.guestCommentPrompt}</p>
                   <button
-                    key={idx}
                     type="button"
                     onClick={() => {
-                      setCommentInput(suggestion);
                       playClickSound();
+                      onOpenAuth?.();
                     }}
-                    className="px-2.5 py-1 rounded-full bg-zinc-800 hover:bg-zinc-700 text-zinc-300 hover:text-white text-[10px] whitespace-nowrap transition-colors"
+                    className="px-3.5 py-2 rounded-full bg-[#00FF88] text-black font-bold text-xs flex items-center gap-1.5 shrink-0 hover:bg-[#00e57a] active:scale-95 transition-all"
                   >
-                    {suggestion}
+                    <LogIn size={13} />
+                    <span>{t.reelViewer.loginBtn}</span>
                   </button>
-                ))}
-              </div>
-
-              {/* Voice-to-Text Active Status Bar */}
-              {isVoiceTyping && (
-                <div className="mb-2 p-2 rounded-xl bg-zinc-900 border border-[#00FF88]/60 flex items-center justify-between gap-2 animate-fadeIn">
-                  <div className="flex items-center gap-2 min-w-0">
-                    <span className="relative flex h-2.5 w-2.5">
-                      <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-[#00FF88] opacity-75" />
-                      <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-[#00FF88]" />
-                    </span>
-                    <div className="flex items-center gap-0.5 h-3">
-                      {[5, 12, 8, 16, 7].map((h, i) => (
-                        <span
-                          key={i}
-                          className="w-0.5 bg-[#00FF88] rounded-full animate-pulse"
-                          style={{ height: `${h}px`, animationDelay: `${i * 100}ms` }}
-                        />
-                      ))}
-                    </div>
-                    <span className="text-[11px] text-[#00FF88] font-medium truncate">
-                      {interimText ? `"${interimText}"` : 'सुन रहे हैं... बोलिए (Speak to type)'}
-                    </span>
-                  </div>
-
-                  <div className="flex items-center gap-1.5 shrink-0">
-                    <button
-                      type="button"
-                      onClick={() => toggleVoiceTyping(voiceLanguage === 'hi-IN' ? 'en-IN' : 'hi-IN')}
-                      className="px-2 py-0.5 rounded bg-zinc-800 text-[10px] font-semibold text-zinc-300 hover:text-white border border-zinc-700 flex items-center gap-1"
-                    >
-                      <Languages size={10} />
-                      <span>{voiceLanguage === 'hi-IN' ? 'हिन्दी' : 'EN'}</span>
-                    </button>
-                    <button
-                      type="button"
-                      onClick={stopVoiceTyping}
-                      className="px-2 py-0.5 rounded bg-zinc-800 text-[10px] font-semibold text-[#00FF88] border border-zinc-700"
-                    >
-                      Done ✓
-                    </button>
-                  </div>
                 </div>
+              ) : isReelAuthorBlocked ? (
+                <div className="pt-3 border-t border-zinc-800 text-center">
+                  <p className="text-xs font-semibold text-rose-300">
+                    {t.reelViewer.blockedCommentNotice}
+                  </p>
+                </div>
+              ) : (
+                <>
+                  {/* Quick Voice Suggestions */}
+                  <div className="py-2 border-t border-zinc-800/80 flex items-center gap-1.5 overflow-x-auto no-scrollbar">
+                    <span className="text-[10px] text-zinc-500 shrink-0 flex items-center gap-1">
+                      <Sparkles size={11} className="text-[#00FF88]" />
+                      <span>{t.reelViewer.quickLabel}</span>
+                    </span>
+                    {VOICE_SUGGESTIONS.map((suggestion, idx) => (
+                      <button
+                        key={idx}
+                        type="button"
+                        onClick={() => {
+                          setCommentInput(suggestion);
+                          playClickSound();
+                        }}
+                        className="px-2.5 py-1 rounded-full bg-zinc-800 hover:bg-zinc-700 text-zinc-300 hover:text-white text-[10px] whitespace-nowrap transition-colors"
+                      >
+                        {suggestion}
+                      </button>
+                    ))}
+                  </div>
+
+                  {/* Voice-to-Text Active Status Bar */}
+                  {isVoiceTyping && (
+                    <div className="mb-2 p-2 rounded-xl bg-zinc-900 border border-[#00FF88]/60 flex items-center justify-between gap-2 animate-fadeIn">
+                      <div className="flex items-center gap-2 min-w-0">
+                        <span className="relative flex h-2.5 w-2.5">
+                          <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-[#00FF88] opacity-75" />
+                          <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-[#00FF88]" />
+                        </span>
+                        <div className="flex items-center gap-0.5 h-3">
+                          {[5, 12, 8, 16, 7].map((h, i) => (
+                            <span
+                              key={i}
+                              className="w-0.5 bg-[#00FF88] rounded-full animate-pulse"
+                              style={{ height: `${h}px`, animationDelay: `${i * 100}ms` }}
+                            />
+                          ))}
+                        </div>
+                        <span className="text-[11px] text-[#00FF88] font-medium truncate">
+                          {interimText ? `"${interimText}"` : t.reelViewer.listeningSpeakNow}
+                        </span>
+                      </div>
+
+                      <div className="flex items-center gap-1.5 shrink-0">
+                        <button
+                          type="button"
+                          onClick={() => toggleVoiceTyping(voiceLanguage === 'hi-IN' ? 'en-IN' : 'hi-IN')}
+                          className="px-2 py-0.5 rounded bg-zinc-800 text-[10px] font-semibold text-zinc-300 hover:text-white border border-zinc-700 flex items-center gap-1"
+                        >
+                          <Languages size={10} />
+                          <span>{voiceLanguage === 'hi-IN' ? 'हिंदी' : 'EN'}</span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={stopVoiceTyping}
+                          className="px-2 py-0.5 rounded bg-zinc-800 text-[10px] font-semibold text-[#00FF88] border border-zinc-700"
+                        >
+                          {t.reelViewer.doneBtn}
+                        </button>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Drawer Comment Form */}
+                  <form onSubmit={handleSendComment} className="pt-2 border-t border-zinc-800 flex items-center gap-2">
+                    <input
+                      type="text"
+                      value={commentInput + (isVoiceTyping && interimText ? ` ${interimText}` : '')}
+                      onChange={(e) => setCommentInput(e.target.value)}
+                      placeholder={t.reelViewer.commentPlaceholder}
+                      className={`flex-1 h-9 px-3 bg-zinc-800/90 border rounded-full text-xs text-white placeholder-zinc-500 focus:outline-none transition-all ${
+                        isVoiceTyping
+                          ? 'border-[#00FF88] ring-1 ring-[#00FF88]'
+                          : 'border-zinc-700 focus:border-[#00FF88]'
+                      }`}
+                    />
+
+                    {/* Voice Typing Mic Button */}
+                    <button
+                      type="button"
+                      onClick={() => toggleVoiceTyping()}
+                      className={`w-9 h-9 rounded-full flex items-center justify-center transition-all active:scale-95 shrink-0 ${
+                        isVoiceTyping
+                          ? 'bg-[#00FF88] text-black shadow-md shadow-[#00FF88]/40 animate-pulse'
+                          : 'bg-zinc-800 hover:bg-zinc-700 border border-zinc-700 text-zinc-300 hover:text-[#00FF88]'
+                      }`}
+                    >
+                      {isVoiceTyping ? <MicOff size={16} /> : <Mic size={16} />}
+                    </button>
+
+                    <button
+                      type="submit"
+                      disabled={!commentInput.trim() && !interimText.trim()}
+                      className="px-4 h-9 rounded-full bg-[#00FF88] text-black font-bold text-xs disabled:opacity-40 hover:bg-[#00e57a] transition-colors"
+                    >
+                      {t.reelViewer.postBtn}
+                    </button>
+                  </form>
+                </>
               )}
-
-              {/* Drawer Comment Form */}
-              <form onSubmit={handleSendComment} className="pt-2 border-t border-zinc-800 flex items-center gap-2">
-                <input
-                  type="text"
-                  value={commentInput + (isVoiceTyping && interimText ? ` ${interimText}` : '')}
-                  onChange={(e) => setCommentInput(e.target.value)}
-                  placeholder="कमेंट लिखें या 🎙️ बोलकर टाइप करें..."
-                  className={`flex-1 h-9 px-3 bg-zinc-800/90 border rounded-full text-xs text-white placeholder-zinc-500 focus:outline-none transition-all ${
-                    isVoiceTyping
-                      ? 'border-[#00FF88] ring-1 ring-[#00FF88]'
-                      : 'border-zinc-700 focus:border-[#00FF88]'
-                  }`}
-                />
-
-                {/* Voice Typing Mic Button */}
-                <button
-                  type="button"
-                  onClick={() => toggleVoiceTyping()}
-                  className={`w-9 h-9 rounded-full flex items-center justify-center transition-all active:scale-95 shrink-0 ${
-                    isVoiceTyping
-                      ? 'bg-[#00FF88] text-black shadow-md shadow-[#00FF88]/40 animate-pulse'
-                      : 'bg-zinc-800 hover:bg-zinc-700 border border-zinc-700 text-zinc-300 hover:text-[#00FF88]'
-                  }`}
-                  title={isVoiceTyping ? 'Stop Voice Typing' : 'Voice-to-Text (बोलकर टाइप करें)'}
-                >
-                  {isVoiceTyping ? <MicOff size={16} /> : <Mic size={16} />}
-                </button>
-
-                <button
-                  type="submit"
-                  disabled={!commentInput.trim() && !interimText.trim()}
-                  className="px-4 h-9 rounded-full bg-[#00FF88] text-black font-bold text-xs disabled:opacity-40 hover:bg-[#00e57a] transition-colors"
-                >
-                  Post
-                </button>
-              </form>
             </div>
           </div>
         )}
@@ -868,25 +983,88 @@ export const ReelViewerModal: React.FC<ReelViewerModalProps> = ({
             <div className="bg-[#181C20] border-t border-zinc-800 rounded-t-2xl p-4 space-y-2">
               <div className="w-10 h-1 bg-zinc-600 rounded-full mx-auto mb-3" />
 
+              {/* Owner-Only Options: Edit Caption & Delete Reel */}
+              {isOwnReel && (
+                <>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      playClickSound();
+                      setShowMoreMenu(false);
+                      setCaptionDraft(currentReel.title || '');
+                      setCaptionEditError(null);
+                      setShowEditCaptionModal(true);
+                    }}
+                    className="w-full py-2.5 px-3 text-left text-sm text-white hover:bg-zinc-800 rounded-xl flex items-center gap-3 font-medium"
+                  >
+                    <Pencil size={18} className="text-[#00FF88]" />
+                    <span>{t.reelViewer.moreMenu.editCaption}</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => {
+                      playClickSound();
+                      setShowMoreMenu(false);
+                      setDeleteError(null);
+                      setShowDeleteConfirm(true);
+                    }}
+                    className="w-full py-2.5 px-3 text-left text-sm text-rose-400 hover:bg-rose-500/10 rounded-xl flex items-center gap-3 font-medium"
+                  >
+                    <Trash2 size={18} className="text-rose-400" />
+                    <span>{t.reelViewer.moreMenu.deleteReel}</span>
+                  </button>
+                </>
+              )}
+
               {/* Dislike Reel */}
               <button
                 onClick={() => {
+                  setShowMoreMenu(false);
+                  if (isGuest) {
+                    setGuestAlert(t.reelViewer.guestMoreActionAlert);
+                    setTimeout(() => setGuestAlert(null), 3500);
+                    return;
+                  }
                   playClickSound();
                   onDislikeReel?.(currentReel.id);
-                  setShowMoreMenu(false);
                 }}
                 className="w-full py-2.5 px-3 text-left text-sm text-zinc-200 hover:bg-zinc-800 rounded-xl flex items-center justify-between"
               >
                 <div className="flex items-center gap-3">
                   <ThumbsDown size={18} className={currentReel.isDisliked ? 'text-amber-400 fill-amber-400' : ''} />
-                  <span>{currentReel.isDisliked ? 'नापसंद हटाया (Disliked)' : 'नापसंद करें (Dislike Reel)'}</span>
+                  <span>
+                    {currentReel.isDisliked
+                      ? t.reelViewer.moreMenu.undislikeReel
+                      : t.reelViewer.moreMenu.dislikeReel}
+                  </span>
                 </div>
                 {currentReel.isDisliked && (
                   <span className="text-[10px] text-amber-400 bg-amber-400/15 px-2 py-0.5 rounded-full font-bold">
-                    Disliked
+                    {t.reelViewer.moreMenu.dislikedBadge}
                   </span>
                 )}
               </button>
+
+              {/* Block Creator */}
+              {!isOwnReel && (
+                <button
+                  onClick={() => {
+                    setShowMoreMenu(false);
+                    if (isGuest) {
+                      setGuestAlert(t.reelViewer.guestMoreActionAlert);
+                      setTimeout(() => setGuestAlert(null), 3500);
+                      return;
+                    }
+                    playClickSound();
+                    setShowBlockConfirm(true);
+                  }}
+                  className="w-full py-2.5 px-3 text-left text-sm text-rose-400 hover:bg-rose-500/10 rounded-xl flex items-center gap-3"
+                >
+                  <Ban size={18} className="text-rose-400" />
+                  <span>{t.reelViewer.moreMenu.blockCreator}</span>
+                </button>
+              )}
 
               {/* Report Reel */}
               <button
@@ -900,11 +1078,11 @@ export const ReelViewerModal: React.FC<ReelViewerModalProps> = ({
               >
                 <div className="flex items-center gap-3">
                   <AlertTriangle size={18} className="text-rose-400" />
-                  <span>Report Reel (रिपोर्ट करें)</span>
+                  <span>{t.reelViewer.moreMenu.reportReel}</span>
                 </div>
                 {(currentReel.reportsCount || 0) > 0 && (
                   <span className="text-[10px] text-rose-400 bg-rose-500/15 px-2 py-0.5 rounded-full font-bold">
-                    {currentReel.reportsCount} Reports
+                    {t.reelViewer.moreMenu.reportsBadge(currentReel.reportsCount || 0)}
                   </span>
                 )}
               </button>
@@ -917,7 +1095,7 @@ export const ReelViewerModal: React.FC<ReelViewerModalProps> = ({
                 className="w-full py-2.5 px-3 text-left text-sm text-zinc-200 hover:bg-zinc-800 rounded-xl flex items-center gap-3"
               >
                 <Copy size={18} />
-                <span>Copy link</span>
+                <span>{t.reelViewer.moreMenu.copyLink}</span>
               </button>
               <button
                 onClick={() => {
@@ -927,13 +1105,13 @@ export const ReelViewerModal: React.FC<ReelViewerModalProps> = ({
                 className="w-full py-2.5 px-3 text-left text-sm text-zinc-200 hover:bg-zinc-800 rounded-xl flex items-center gap-3"
               >
                 <Share2 size={18} />
-                <span>Share to...</span>
+                <span>{t.reelViewer.moreMenu.shareTo}</span>
               </button>
               <button
                 onClick={() => setShowMoreMenu(false)}
                 className="w-full py-2.5 text-center text-sm font-semibold text-zinc-400 hover:text-white pt-2 border-t border-zinc-800"
               >
-                Cancel
+                {t.reelViewer.moreMenu.cancel}
               </button>
             </div>
           </div>
@@ -946,7 +1124,7 @@ export const ReelViewerModal: React.FC<ReelViewerModalProps> = ({
               <div className="flex items-center justify-between pb-3 border-b border-zinc-800 mb-3">
                 <div className="flex items-center gap-2">
                   <Flag size={18} className="text-rose-400" />
-                  <h3 className="font-bold text-white text-sm">वीडियो की रिपोर्ट करें</h3>
+                  <h3 className="font-bold text-white text-sm">{t.reelViewer.reportModal.title}</h3>
                 </div>
                 <button
                   onClick={() => setShowReportModal(false)}
@@ -961,36 +1139,30 @@ export const ReelViewerModal: React.FC<ReelViewerModalProps> = ({
                   <div className="w-12 h-12 rounded-full bg-emerald-500/20 border border-emerald-500/40 text-[#00FF88] flex items-center justify-center mx-auto mb-2 text-xl font-bold">
                     ✓
                   </div>
-                  <p className="text-sm font-bold text-white">रिपोर्ट सफलतापूर्वक दर्ज की गई!</p>
+                  <p className="text-sm font-bold text-white">{t.reelViewer.reportModal.submittedTitle}</p>
                   <p className="text-xs text-zinc-400 leading-relaxed px-2">
-                    आपकी रिपोर्ट दर्ज हो चुकी है। INFINITY कम्युनिटी सेफ्टी नियम के तहत यदि इस रील पर 7 या अधिक रिपोर्ट आती हैं, तो यह जनता से तुरंत स्वतः हाइड हो जाएगी।
+                    {t.reelViewer.reportModal.submittedDesc}
                   </p>
                   <button
                     onClick={() => setShowReportModal(false)}
                     className="mt-4 px-6 py-2 rounded-full bg-zinc-800 hover:bg-zinc-700 text-white text-xs font-bold transition-all"
                   >
-                    ठीक है (Close)
+                    {t.reelViewer.reportModal.okClose}
                   </button>
                 </div>
               ) : (
                 <>
                   <p className="text-xs text-zinc-400 mb-2.5">
-                    रिपोर्ट का मुख्य कारण चुनें (Select reason for reporting @{currentReel.user}):
+                    {t.reelViewer.reportModal.selectReasonLabel(currentReel.user)}
                   </p>
 
                   <div className="space-y-1.5 mb-3.5">
-                    {[
-                      '🚫 स्पैम या भ्रामक सामग्री (Spam / Misleading)',
-                      '🔞 अश्लील या अनुचित सामग्री (Adult / Inappropriate)',
-                      '🤬 नफरत फैलाने वाली भाषा (Hate Speech)',
-                      '⚠️ हिंसा या खतरनाक गतिविधियां (Violence)',
-                      '❌ झूठी जानकारी या फ्रॉड (False Info / Scam)',
-                    ].map((reason) => (
+                    {t.reelViewer.reportModal.reasons.map((reason, idx) => (
                       <label
-                        key={reason}
-                        onClick={() => setSelectedReportReason(reason)}
+                        key={idx}
+                        onClick={() => setSelectedReportReasonIdx(idx)}
                         className={`flex items-center gap-2.5 p-2 rounded-xl border cursor-pointer text-xs transition-colors ${
-                          selectedReportReason === reason
+                          selectedReportReasonIdx === idx
                             ? 'border-rose-500 bg-rose-500/10 text-white'
                             : 'border-zinc-800 bg-zinc-900/60 text-zinc-400 hover:border-zinc-700'
                         }`}
@@ -998,8 +1170,8 @@ export const ReelViewerModal: React.FC<ReelViewerModalProps> = ({
                         <input
                           type="radio"
                           name="reportReason"
-                          checked={selectedReportReason === reason}
-                          onChange={() => setSelectedReportReason(reason)}
+                          checked={selectedReportReasonIdx === idx}
+                          onChange={() => setSelectedReportReasonIdx(idx)}
                           className="accent-rose-500"
                         />
                         <span>{reason}</span>
@@ -1008,7 +1180,7 @@ export const ReelViewerModal: React.FC<ReelViewerModalProps> = ({
                   </div>
 
                   <div className="p-2.5 rounded-xl bg-zinc-900 border border-zinc-800 text-[11px] text-zinc-400 mb-3.5 leading-relaxed">
-                    🛡️ <strong>7-रिपोर्ट्स ऑटो-प्रोटेक्शन:</strong> रील पर 7 रिपोर्ट्स जमा होते ही यह पब्लिक डिस्कवरी से स्वतः हट जाती है, ताकि समाज और क्रिएटर कम्युनिटी सुरक्षित रहे।
+                    <strong>{t.reelViewer.reportModal.protectionNoteTitle}</strong> {t.reelViewer.reportModal.protectionNoteBody}
                   </div>
 
                   <div className="flex items-center justify-end gap-2 pt-2 border-t border-zinc-800">
@@ -1017,7 +1189,7 @@ export const ReelViewerModal: React.FC<ReelViewerModalProps> = ({
                       onClick={() => setShowReportModal(false)}
                       className="px-3 py-1.5 rounded-xl text-xs font-medium text-zinc-400 hover:text-white"
                     >
-                      रद्द करें
+                      {t.reelViewer.reportModal.cancelBtn}
                     </button>
                     <button
                       type="button"
@@ -1027,11 +1199,213 @@ export const ReelViewerModal: React.FC<ReelViewerModalProps> = ({
                       }}
                       className="px-4 py-2 rounded-xl text-xs font-bold bg-rose-600 hover:bg-rose-500 text-white shadow-lg active:scale-95"
                     >
-                      रिपोर्ट दर्ज करें
+                      {t.reelViewer.reportModal.submitBtn}
                     </button>
                   </div>
                 </>
               )}
+            </div>
+          </div>
+        )}
+
+        {/* ================= 6.2 BLOCK USER CONFIRMATION MODAL ================= */}
+        {showBlockConfirm && (
+          <div className="absolute inset-0 z-50 bg-black/85 backdrop-blur-md flex items-center justify-center p-4 animate-fadeIn">
+            <div className="w-full max-w-sm bg-[#161A1D] border border-zinc-800 rounded-2xl p-4 shadow-2xl space-y-4">
+              <div className="flex items-center gap-2 pb-2.5 border-b border-zinc-800">
+                <Ban size={18} className="text-rose-400 shrink-0" />
+                <h3 className="font-bold text-white text-sm">{t.reelViewer.blockModal.title}</h3>
+              </div>
+
+              <p className="text-xs text-zinc-200 leading-relaxed">
+                {t.reelViewer.blockModal.confirmText(currentReel.user)}
+              </p>
+
+              <div className="flex items-center justify-end gap-2 pt-2 border-t border-zinc-800">
+                <button
+                  type="button"
+                  disabled={isBlockingUser}
+                  onClick={() => {
+                    playClickSound();
+                    setShowBlockConfirm(false);
+                  }}
+                  className="px-3.5 py-2 rounded-xl text-xs font-semibold text-zinc-300 hover:text-white bg-zinc-800 hover:bg-zinc-700 transition-colors disabled:opacity-50"
+                >
+                  {t.reelViewer.blockModal.cancelBtn}
+                </button>
+                <button
+                  type="button"
+                  disabled={isBlockingUser}
+                  onClick={async () => {
+                    if (!onBlockUser) return;
+                    playClickSound();
+                    setIsBlockingUser(true);
+                    try {
+                      await onBlockUser({
+                        username: currentReel.user,
+                        avatarUrl: currentReel.userAvatar,
+                      });
+                      setShowBlockConfirm(false);
+                    } finally {
+                      setIsBlockingUser(false);
+                    }
+                  }}
+                  className="px-4 py-2 rounded-xl text-xs font-bold bg-rose-600 hover:bg-rose-500 text-white shadow-lg active:scale-95 disabled:opacity-50"
+                >
+                  {isBlockingUser ? t.reelViewer.blockModal.blockingBtn : t.reelViewer.blockModal.confirmBtn}
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* ================= 6.3 EDIT CAPTION MODAL (OWNER ONLY) ================= */}
+        {showEditCaptionModal && isOwnReel && (
+          <div className="absolute inset-0 z-50 bg-black/85 backdrop-blur-md flex items-center justify-center p-4 animate-fadeIn">
+            <div className="w-full max-w-sm bg-[#161A1D] border border-zinc-800 rounded-2xl p-4 shadow-2xl space-y-3.5">
+              <div className="flex items-center justify-between pb-2.5 border-b border-zinc-800">
+                <div className="flex items-center gap-2">
+                  <Pencil size={17} className="text-[#00FF88] shrink-0" />
+                  <h3 className="font-bold text-white text-sm">{t.reelViewer.editCaptionModal.title}</h3>
+                </div>
+                <button
+                  type="button"
+                  disabled={isSavingCaption}
+                  onClick={() => setShowEditCaptionModal(false)}
+                  className="text-zinc-400 hover:text-white p-1 disabled:opacity-50"
+                >
+                  <X size={18} />
+                </button>
+              </div>
+
+              <textarea
+                value={captionDraft}
+                onChange={(e) => {
+                  setCaptionDraft(e.target.value);
+                  if (captionEditError) setCaptionEditError(null);
+                }}
+                rows={4}
+                maxLength={500}
+                autoFocus
+                placeholder={t.reelViewer.editCaptionModal.placeholder}
+                className="w-full p-3 rounded-xl bg-zinc-900 border border-zinc-700 focus:border-[#00FF88] text-xs text-white placeholder-zinc-500 focus:outline-none resize-none leading-relaxed"
+              />
+
+              <div className="flex items-center justify-between text-[11px] text-zinc-500">
+                <span>{captionDraft.trim().length}/500</span>
+              </div>
+
+              {captionEditError && (
+                <div className="p-2.5 rounded-xl bg-rose-950/70 border border-rose-500/40 text-xs text-rose-300">
+                  {captionEditError}
+                </div>
+              )}
+
+              <div className="flex items-center justify-end gap-2 pt-2 border-t border-zinc-800">
+                <button
+                  type="button"
+                  disabled={isSavingCaption}
+                  onClick={() => {
+                    playClickSound();
+                    setShowEditCaptionModal(false);
+                  }}
+                  className="px-3.5 py-2 rounded-xl text-xs font-semibold text-zinc-300 hover:text-white bg-zinc-800 hover:bg-zinc-700 transition-colors disabled:opacity-50"
+                >
+                  {t.reelViewer.editCaptionModal.cancelBtn}
+                </button>
+                <button
+                  type="button"
+                  disabled={isSavingCaption}
+                  onClick={async () => {
+                    const trimmed = captionDraft.trim();
+                    if (!trimmed) {
+                      setCaptionEditError(t.reelViewer.editCaptionModal.emptyError);
+                      return;
+                    }
+                    if (!onEditReelCaption) return;
+                    playClickSound();
+                    setIsSavingCaption(true);
+                    setCaptionEditError(null);
+                    try {
+                      const res = await onEditReelCaption(currentReel.id, trimmed);
+                      if (res.success) {
+                        setShowEditCaptionModal(false);
+                      } else {
+                        setCaptionEditError(res.error || t.reelViewer.editCaptionModal.saveFailedError);
+                      }
+                    } catch {
+                      setCaptionEditError(t.reelViewer.editCaptionModal.saveFailedError);
+                    } finally {
+                      setIsSavingCaption(false);
+                    }
+                  }}
+                  className="px-4 py-2 rounded-xl text-xs font-bold bg-[#00FF88] hover:bg-[#00e57a] text-black shadow-lg active:scale-95 disabled:opacity-50"
+                >
+                  {isSavingCaption ? t.reelViewer.editCaptionModal.savingBtn : t.reelViewer.editCaptionModal.saveBtn}
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* ================= 6.4 DELETE REEL CONFIRMATION MODAL (OWNER ONLY) ================= */}
+        {showDeleteConfirm && isOwnReel && (
+          <div className="absolute inset-0 z-50 bg-black/85 backdrop-blur-md flex items-center justify-center p-4 animate-fadeIn">
+            <div className="w-full max-w-sm bg-[#161A1D] border border-zinc-800 rounded-2xl p-4 shadow-2xl space-y-4">
+              <div className="flex items-center gap-2 pb-2.5 border-b border-zinc-800">
+                <Trash2 size={18} className="text-rose-400 shrink-0" />
+                <h3 className="font-bold text-white text-sm">{t.reelViewer.deleteReelModal.title}</h3>
+              </div>
+
+              <p className="text-xs text-zinc-200 leading-relaxed">
+                {t.reelViewer.deleteReelModal.confirmText}
+              </p>
+
+              {deleteError && (
+                <div className="p-2.5 rounded-xl bg-rose-950/70 border border-rose-500/40 text-xs text-rose-300">
+                  {deleteError}
+                </div>
+              )}
+
+              <div className="flex items-center justify-end gap-2 pt-2 border-t border-zinc-800">
+                <button
+                  type="button"
+                  disabled={isDeletingReel}
+                  onClick={() => {
+                    playClickSound();
+                    setShowDeleteConfirm(false);
+                    setDeleteError(null);
+                  }}
+                  className="px-3.5 py-2 rounded-xl text-xs font-semibold text-zinc-300 hover:text-white bg-zinc-800 hover:bg-zinc-700 transition-colors disabled:opacity-50"
+                >
+                  {t.reelViewer.deleteReelModal.cancelBtn}
+                </button>
+                <button
+                  type="button"
+                  disabled={isDeletingReel}
+                  onClick={async () => {
+                    if (!onDeleteReel) return;
+                    playClickSound();
+                    setIsDeletingReel(true);
+                    setDeleteError(null);
+                    try {
+                      const res = await onDeleteReel(currentReel.id);
+                      if (res.success) {
+                        setShowDeleteConfirm(false);
+                      } else {
+                        setDeleteError(res.error || t.reelViewer.deleteReelModal.deleteFailedError);
+                      }
+                    } catch {
+                      setDeleteError(t.reelViewer.deleteReelModal.deleteFailedError);
+                    } finally {
+                      setIsDeletingReel(false);
+                    }
+                  }}
+                  className="px-4 py-2 rounded-xl text-xs font-bold bg-rose-600 hover:bg-rose-500 text-white shadow-lg active:scale-95 disabled:opacity-50"
+                >
+                  {isDeletingReel ? t.reelViewer.deleteReelModal.deletingBtn : t.reelViewer.deleteReelModal.confirmBtn}
+                </button>
+              </div>
             </div>
           </div>
         )}

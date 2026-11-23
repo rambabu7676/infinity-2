@@ -87,33 +87,62 @@ export const ShareSheetModal: React.FC<ShareSheetModalProps> = ({
   if (!isOpen) return null;
 
   const shareUrl = `${window.location.origin}/#reel-${reel.id}`;
-  const shareText = `Check out this reel by @${reel.user} on Infinity: "${reel.title}"`;
+  const whatsappText = `INFINITY ऐप पर @${reel.user} की यह रील देखें:\n${reel.title ? `${reel.title}\n` : ''}${shareUrl}`;
+  const whatsappShareUrl = `https://wa.me/?text=${encodeURIComponent(whatsappText)}`;
 
   const showToast = (msg: string) => {
     setToastMessage(msg);
     setTimeout(() => setToastMessage(null), 3000);
   };
 
+  const handleCloseSheet = () => {
+    setActiveSubView('main');
+    setCopiedLink(false);
+    setToastMessage(null);
+    onClose();
+  };
+
+  const copyTextToClipboard = async (text: string): Promise<boolean> => {
+    try {
+      if (navigator.clipboard && window.isSecureContext) {
+        await navigator.clipboard.writeText(text);
+        return true;
+      }
+    } catch {
+      // Fallback to execCommand below for iframe environments
+    }
+
+    try {
+      const textarea = document.createElement('textarea');
+      textarea.value = text;
+      textarea.setAttribute('readonly', '');
+      textarea.style.position = 'fixed';
+      textarea.style.top = '-9999px';
+      textarea.style.left = '-9999px';
+      document.body.appendChild(textarea);
+      textarea.focus();
+      textarea.select();
+      const copied = document.execCommand('copy');
+      document.body.removeChild(textarea);
+      return copied;
+    } catch {
+      return false;
+    }
+  };
+
   // 1. Copy Link handler
   const handleCopyLink = async () => {
     playClickSound();
-    try {
-      if (navigator.clipboard) {
-        await navigator.clipboard.writeText(shareUrl);
-      }
-      setCopiedLink(true);
-      showToast('Link copied to clipboard! 📋');
-      setTimeout(() => setCopiedLink(false), 2500);
-    } catch {
-      showToast('Link ready to copy');
-    }
+    await copyTextToClipboard(shareUrl);
+    setCopiedLink(true);
+    showToast('लिंक कॉपी हो गया');
+    setTimeout(() => setCopiedLink(false), 2500);
   };
 
   // 2. WhatsApp handler
   const handleWhatsAppShare = () => {
     playClickSound();
-    handleCopyLink();
-    showToast('Reel link copied! Share on WhatsApp 💬');
+    showToast('व्हाट्सएप पर रील शेयर करने के लिए खुल रहा है...');
   };
 
   // 3. Social Share
@@ -201,8 +230,8 @@ export const ShareSheetModal: React.FC<ShareSheetModalProps> = ({
 
   return (
     <div
-      className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-end justify-center select-none animate-fadeIn"
-      onClick={onClose}
+      className="fixed inset-0 z-[60] bg-black/80 backdrop-blur-sm flex items-end justify-center select-none animate-fadeIn"
+      onClick={handleCloseSheet}
     >
       <div
         className="w-full max-w-[430px] bg-[#16181D] border-t border-zinc-800 rounded-t-3xl overflow-hidden shadow-2xl flex flex-col max-h-[85vh] animate-slideUp text-white"
@@ -232,7 +261,7 @@ export const ShareSheetModal: React.FC<ShareSheetModalProps> = ({
                 </h3>
               </div>
               <button
-                onClick={onClose}
+                onClick={handleCloseSheet}
                 className="w-7 h-7 rounded-full bg-zinc-800 hover:bg-zinc-700 flex items-center justify-center text-zinc-400 hover:text-white transition-colors"
                 aria-label="Close"
               >
@@ -329,7 +358,10 @@ export const ShareSheetModal: React.FC<ShareSheetModalProps> = ({
               </span>
               <div className="grid grid-cols-4 gap-2.5 text-center">
                 {/* 1. WhatsApp */}
-                <button
+                <a
+                  href={whatsappShareUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
                   onClick={handleWhatsAppShare}
                   className="flex flex-col items-center gap-1.5 p-2 rounded-2xl bg-zinc-900/80 hover:bg-zinc-800 active:scale-95 transition-all group"
                 >
@@ -339,10 +371,10 @@ export const ShareSheetModal: React.FC<ShareSheetModalProps> = ({
                       <path d="M12.04 2c-5.46 0-9.91 4.45-9.91 9.91 0 1.75.46 3.45 1.32 4.95L2.05 22l5.25-1.38c1.45.79 3.08 1.21 4.74 1.21 5.46 0 9.91-4.45 9.91-9.91 0-2.65-1.03-5.14-2.9-7.01A9.82 9.82 0 0012.04 2zm0 18.15c-1.48 0-2.93-.4-4.2-1.15l-.3-.18-3.12.82.83-3.04-.2-.31a8.17 8.17 0 01-1.25-4.38c0-4.54 3.7-8.24 8.24-8.24 2.2 0 4.27.86 5.82 2.42a8.18 8.18 0 012.41 5.82c0 4.54-3.7 8.24-8.23 8.24zm4.52-6.17c-.25-.12-1.47-.72-1.7-.8-.23-.09-.39-.12-.56.12-.17.25-.64.8-.79.97-.15.17-.29.2-.54.07-.25-.12-1.05-.39-2-1.23-.74-.66-1.23-1.47-1.38-1.72-.15-.25-.02-.38.11-.5.11-.11.25-.29.37-.43.12-.15.17-.25.25-.42.08-.17.04-.31-.02-.43-.06-.12-.56-1.34-.76-1.84-.2-.49-.4-.42-.56-.43h-.48c-.17 0-.43.06-.66.31-.23.25-.87.85-.87 2.07 0 1.22.89 2.4 1.01 2.57.12.17 1.76 2.68 4.25 3.76.59.26 1.06.41 1.42.53.6.19 1.14.16 1.57.1.48-.07 1.47-.6 1.68-1.18.21-.58.21-1.07.15-1.18-.06-.11-.23-.17-.48-.3z" />
                     </svg>
                   </div>
-                  <span className="text-[11px] font-semibold text-zinc-200">
-                    WhatsApp
+                  <span className="text-[11px] font-semibold text-zinc-200 leading-tight">
+                    व्हाट्सएप पर भेजें
                   </span>
-                </button>
+                </a>
 
                 {/* 2. Instagram */}
                 <button
@@ -364,6 +396,7 @@ export const ShareSheetModal: React.FC<ShareSheetModalProps> = ({
 
                 {/* 3. Copy Link */}
                 <button
+                  type="button"
                   onClick={handleCopyLink}
                   className="flex flex-col items-center gap-1.5 p-2 rounded-2xl bg-zinc-900/80 hover:bg-zinc-800 active:scale-95 transition-all group"
                 >
@@ -376,8 +409,8 @@ export const ShareSheetModal: React.FC<ShareSheetModalProps> = ({
                   >
                     {copiedLink ? <Check size={22} className="stroke-[3]" /> : <Copy size={20} />}
                   </div>
-                  <span className="text-[11px] font-semibold text-zinc-200">
-                    {copiedLink ? 'Copied!' : 'Copy Link'}
+                  <span className="text-[11px] font-semibold text-zinc-200 leading-tight">
+                    {copiedLink ? 'लिंक कॉपी हो गया' : 'लिंक कॉपी करें'}
                   </span>
                 </button>
 

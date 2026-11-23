@@ -2,11 +2,13 @@ import {
   createUserWithEmailAndPassword,
   signInWithEmailAndPassword,
   signInWithPopup,
+  reauthenticateWithPopup,
   GoogleAuthProvider,
   signOut,
   sendPasswordResetEmail,
   updateProfile,
   onAuthStateChanged,
+  deleteUser,
   User
 } from 'firebase/auth';
 import { doc, getDoc, setDoc } from 'firebase/firestore';
@@ -297,3 +299,101 @@ export function createGuestProfile(): UserProfile {
     isGuest: true,
   };
 }
+
+let googleReauthInProgress = false;
+
+export function isGoogleReauthInProgress(): boolean {
+  return googleReauthInProgress;
+}
+
+export async function reauthenticateWithGoogleForAccountAction(
+  currentProfile?: UserProfile
+): Promise<{ verified: boolean; error?: string }> {
+  const provider = new GoogleAuthProvider();
+  provider.setCustomParameters({ prompt: 'select_account' });
+
+  googleReauthInProgress = true;
+  try {
+    const existingAuthUser = auth.currentUser;
+    const isGoogleAuthLinked = Boolean(
+      existingAuthUser?.providerData?.some((p) => p.providerId === 'google.com')
+    );
+
+    const credential =
+      existingAuthUser && isGoogleAuthLinked
+        ? await reauthenticateWithPopup(existingAuthUser, provider)
+        : await signInWithPopup(auth, provider);
+
+    const verifiedEmail = credential.user.email?.trim().toLowerCase() || '';
+    const profileEmail = currentProfile?.email?.trim().toLowerCase() || '';
+
+    if (
+      profileEmail &&
+      !profileEmail.endsWith('@infinity.app') &&
+      verifiedEmail &&
+      profileEmail !== verifiedEmail
+    ) {
+      return {
+        verified: false,
+        error: 'कृपया उसी Google खाते से लॉगिन करें जिससे यह खाता जुड़ा है।',
+      };
+    }
+
+    // If a phone/local session verified via Google popup, don't leave a mismatched Auth session active
+    if (
+      currentProfile?.uid &&
+      (currentProfile.uid.startsWith('phone_') || currentProfile.uid.startsWith('google_')) &&
+      credential.user.uid !== currentProfile.uid
+    ) {
+      try {
+        await signOut(auth);
+      } catch {
+        // ignore transient cleanup failure
+      }
+    }
+
+    return { verified: true };
+  } catch (err: any) {
+    const code = err?.code || '';
+    if (code === 'auth/popup-closed-by-user' || code === 'auth/cancelled-popup-request') {
+      return {
+        verified: false,
+        error: 'Google लॉगिन रद्द कर दिया गया। खाता मिटाने के लिए दोबारा Google लॉगिन ज़रूरी है।',
+      };
+    }
+    if (code === 'auth/user-mismatch') {
+      return {
+        verified: false,
+        error: 'कृपया उसी Google खाते से लॉगिन करें जिससे यह खाता जुड़ा है।',
+      };
+    }
+    if (code === 'auth/popup-blocked') {
+      return {
+        verified: false,
+        error: 'पॉपअप ब्लॉक हो गया है। कृपया ब्राउज़र में पॉपअप की अनुमति देकर दोबारा प्रयास करें।',
+      };
+    }
+    return {
+      verified: false,
+      error: 'Google सत्यापन पूरा नहीं हो सका। कृपया दोबारा प्रयास करें।',
+    };
+  } finally {
+    googleReauthInProgress = false;
+  }
+}
+
+export async function deleteFirebaseAuthUserIfSignedIn(): Promise<void> {
+  const user = auth.currentUser;
+  if (!user) return;
+  try {
+    await deleteUser(user);
+  } catch (err) {
+    console.warn('Could not delete Firebase Auth user directly, signing out instead:', err);
+    try {
+      await signOut(auth);
+    } catch {
+      // ignore signOut fallback failure
+    }
+  }
+}
+

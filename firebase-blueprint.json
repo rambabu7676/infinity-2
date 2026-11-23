@@ -6,6 +6,7 @@
       "type": "object",
       "properties": {
         "id": { "type": "string" },
+        "uid": { "type": "string", "description": "Creator Firebase UID" },
         "title": { "type": "string", "description": "Caption and hashtags" },
         "user": { "type": "string", "description": "Creator username" },
         "userAvatar": { "type": "string", "description": "Creator avatar URL" },
@@ -24,6 +25,7 @@
         "isFollowing": { "type": "boolean" },
         "timestamp": { "type": "number" },
         "createdAt": { "type": "string" },
+        "isAccountHidden": { "type": "boolean" },
         "cloudinary": {
           "type": "object",
           "description": "Cloudinary storage metadata (publicId, format, bytes, duration, secureUrl)"
@@ -40,12 +42,23 @@
         "userId": { "type": "string" },
         "username": { "type": "string" },
         "userAvatar": { "type": "string" },
-        "isMyStory": { "type": "boolean" },
-        "hasUnseen": { "type": "boolean" },
         "slides": { "type": "array" },
-        "timestamp": { "type": "number" }
+        "timestamp": { "type": "number" },
+        "updatedAt": { "type": "number" },
+        "isAccountHidden": { "type": "boolean" }
       },
-      "required": ["id", "userId", "username"]
+      "required": ["id", "userId", "username", "slides"]
+    },
+    "SeenStory": {
+      "title": "SeenStory",
+      "description": "Tracks the latest slide timestamp viewed by a user for each story",
+      "type": "object",
+      "properties": {
+        "storyId": { "type": "string" },
+        "seenAt": { "type": "number" },
+        "latestSlideTs": { "type": "number" }
+      },
+      "required": ["storyId", "seenAt", "latestSlideTs"]
     },
     "Post": {
       "title": "Post",
@@ -53,6 +66,7 @@
       "type": "object",
       "properties": {
         "id": { "type": "string" },
+        "uid": { "type": "string", "description": "Creator Firebase UID" },
         "caption": { "type": "string" },
         "user": { "type": "string" },
         "userAvatar": { "type": "string" },
@@ -62,6 +76,7 @@
         "commentsCount": { "type": "number" },
         "timestamp": { "type": "number" },
         "createdAt": { "type": "string" },
+        "isAccountHidden": { "type": "boolean" },
         "cloudinary": { "type": "object" }
       },
       "required": ["id", "user", "mediaUrl"]
@@ -89,7 +104,13 @@
         "phone": { "type": "string" },
         "badgeExpiryDate": { "type": "number" },
         "goldenThemeEnabled": { "type": "boolean" },
-        "isGuest": { "type": "boolean" }
+        "isGuest": { "type": "boolean" },
+        "accountStatus": { "type": "string", "enum": ["active", "deactivated", "pending_deletion"] },
+        "deactivatedAt": { "type": ["number", "null"] },
+        "deletionScheduledAt": { "type": ["number", "null"] },
+        "deletionDays": { "type": ["number", "null"] },
+        "isAccountHidden": { "type": "boolean" },
+        "preferredLanguage": { "type": "string", "enum": ["hi", "en"] }
       },
       "required": ["name", "username"]
     },
@@ -119,12 +140,159 @@
         "reportedAt": { "type": "number" }
       },
       "required": ["reelId", "reporterId", "reason"]
+    },
+    "ReelComment": {
+      "title": "ReelComment",
+      "description": "User comment on a reel stored in reels/{reelId}/comments/{commentId}",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "reelId": { "type": "string" },
+        "uid": { "type": "string" },
+        "user": { "type": "string" },
+        "avatar": { "type": "string" },
+        "text": { "type": "string", "maxLength": 1000 },
+        "timeAgo": { "type": "string" },
+        "likes": { "type": "number" },
+        "createdAt": { "type": "number" }
+      },
+      "required": ["id", "reelId", "uid", "user", "text", "createdAt"]
+    },
+    "SavedReel": {
+      "title": "SavedReel",
+      "description": "Saved reel bookmark stored under users/{userId}/saved/{reelId}",
+      "type": "object",
+      "properties": {
+        "reelId": { "type": "string" },
+        "uid": { "type": "string" },
+        "savedAt": { "type": "number" }
+      },
+      "required": ["reelId", "uid", "savedAt"]
+    },
+    "DislikedReel": {
+      "title": "DislikedReel",
+      "description": "Disliked reel marker stored under users/{userId}/disliked/{reelId}",
+      "type": "object",
+      "properties": {
+        "reelId": { "type": "string" },
+        "uid": { "type": "string" },
+        "dislikedAt": { "type": "number" }
+      },
+      "required": ["reelId", "uid", "dislikedAt"]
+    },
+    "ReelLike": {
+      "title": "ReelLike",
+      "description": "Reel like marker stored under reels/{reelId}/likes/{userId}",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string" },
+        "reelId": { "type": "string" },
+        "createdAt": { "type": "number" }
+      },
+      "required": ["uid", "reelId", "createdAt"]
+    },
+    "UsernameClaim": {
+      "title": "UsernameClaim",
+      "description": "Unique lowercase username reservation mapped to owner uid",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string" },
+        "username": { "type": "string", "minLength": 3, "maxLength": 30, "pattern": "^[a-z0-9_]{3,30}$" },
+        "updatedAt": { "type": "number" }
+      },
+      "required": ["uid", "username", "updatedAt"]
+    },
+    "UserNotification": {
+      "title": "UserNotification",
+      "description": "Real-time user notification for likes, comments, and follows",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "type": { "type": "string", "enum": ["like", "comment", "follow"] },
+        "actorUid": { "type": "string" },
+        "actorUsername": { "type": "string", "maxLength": 60 },
+        "actorName": { "type": "string", "maxLength": 80 },
+        "actorAvatar": { "type": "string", "maxLength": 500 },
+        "recipientUid": { "type": "string" },
+        "reelId": { "type": "string", "maxLength": 128 },
+        "reelTitle": { "type": "string", "maxLength": 200 },
+        "commentText": { "type": "string", "maxLength": 200 },
+        "message": { "type": "string", "maxLength": 500 },
+        "read": { "type": "boolean" },
+        "createdAt": { "type": "number" }
+      },
+      "required": ["id", "type", "actorUid", "actorUsername", "recipientUid", "message", "read", "createdAt"]
+    },
+    "BlockedUser": {
+      "title": "BlockedUser",
+      "description": "Blocked user entry stored under users/{userId}/blocked/{blockedKey}",
+      "type": "object",
+      "properties": {
+        "blockId": { "type": "string" },
+        "blockerUid": { "type": "string" },
+        "blockerUsername": { "type": "string", "maxLength": 60 },
+        "blockedUid": { "type": "string", "maxLength": 128 },
+        "blockedUsername": { "type": "string", "maxLength": 60 },
+        "blockedName": { "type": "string", "maxLength": 80 },
+        "blockedAvatar": { "type": "string", "maxLength": 500 },
+        "blockedAt": { "type": "number" }
+      },
+      "required": ["blockId", "blockerUid", "blockerUsername", "blockedUsername", "blockedAt"]
+    },
+    "BlockRelation": {
+      "title": "BlockRelation",
+      "description": "Who-blocked-whom relation stored in /blocks/{blockId}",
+      "type": "object",
+      "properties": {
+        "blockId": { "type": "string" },
+        "blockerUid": { "type": "string" },
+        "blockerUsername": { "type": "string", "maxLength": 60 },
+        "blockedUid": { "type": "string", "maxLength": 128 },
+        "blockedUsername": { "type": "string", "maxLength": 60 },
+        "createdAt": { "type": "number" }
+      },
+      "required": ["blockId", "blockerUid", "blockerUsername", "blockedUsername", "createdAt"]
+    },
+    "FollowingUser": {
+      "title": "FollowingUser",
+      "description": "User followed by a user, stored under users/{userId}/following/{targetUsername}",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string" },
+        "username": { "type": "string", "maxLength": 60 },
+        "targetUid": { "type": "string", "maxLength": 128 },
+        "name": { "type": "string", "maxLength": 80 },
+        "avatarUrl": { "type": "string", "maxLength": 500 },
+        "followedAt": { "type": "number" }
+      },
+      "required": ["uid", "username", "followedAt"]
+    },
+    "FollowerUser": {
+      "title": "FollowerUser",
+      "description": "Follower entry stored under users/{userId}/followers/{followerId}",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string" },
+        "username": { "type": "string", "maxLength": 60 },
+        "name": { "type": "string", "maxLength": 80 },
+        "avatarUrl": { "type": "string", "maxLength": 500 },
+        "followedAt": { "type": "number" }
+      },
+      "required": ["uid", "username", "followedAt"]
     }
   },
   "firestore": {
     "/reels/{reelId}": {
       "schema": "Reel",
       "description": "Reels collection storing captions, text, likes, and Cloudinary video URLs"
+    },
+    "/reels/{reelId}/likes/{userId}": {
+      "schema": "ReelLike",
+      "description": "Per-reel likes subcollection keyed by liker uid"
+    },
+    "/reels/{reelId}/comments/{commentId}": {
+      "schema": "ReelComment",
+      "description": "Public reel comments subcollection readable by all users and writable by logged-in users"
     },
     "/stories/{storyId}": {
       "schema": "Story",
@@ -137,6 +305,42 @@
     "/users/{userId}": {
       "schema": "UserProfile",
       "description": "User profiles collection"
+    },
+    "/usernames/{username}": {
+      "schema": "UsernameClaim",
+      "description": "Unique username ownership index for checking availability"
+    },
+    "/users/{userId}/saved/{reelId}": {
+      "schema": "SavedReel",
+      "description": "Per-user saved reels bookmark subcollection"
+    },
+    "/users/{userId}/disliked/{reelId}": {
+      "schema": "DislikedReel",
+      "description": "Per-user disliked reels subcollection"
+    },
+    "/users/{userId}/notifications/{notificationId}": {
+      "schema": "UserNotification",
+      "description": "Per-user notifications subcollection for likes, comments, and follows"
+    },
+    "/users/{userId}/seenStories/{storyId}": {
+      "schema": "SeenStory",
+      "description": "Per-user seen story markers tracking seen/unseen ring status"
+    },
+    "/users/{userId}/following/{targetUsername}": {
+      "schema": "FollowingUser",
+      "description": "Per-user following subcollection"
+    },
+    "/users/{userId}/followers/{followerId}": {
+      "schema": "FollowerUser",
+      "description": "Per-user followers subcollection"
+    },
+    "/users/{userId}/blocked/{blockedKey}": {
+      "schema": "BlockedUser",
+      "description": "Per-user blocked users subcollection"
+    },
+    "/blocks/{blockId}": {
+      "schema": "BlockRelation",
+      "description": "Who-blocked-whom mutual visibility index"
     },
     "/feedback/{feedbackId}": {
       "schema": "Feedback",

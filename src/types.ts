@@ -9,6 +9,7 @@ export interface ReelComment {
 
 export interface ReelItem {
   id: string;
+  uid?: string;
   views: string;
   viewsCount: number;
   likes: string;
@@ -31,6 +32,7 @@ export interface ReelItem {
   createdAt?: string;
   reportsCount?: number; // Community reports (Auto-hides if >= 7)
   isAutoHidden?: boolean; // Hidden from public feed if reported >= 7 times
+  isAccountHidden?: boolean; // Hidden while owner account is deactivated or pending deletion
   dislikesCount?: number;
   isDisliked?: boolean;
   cloudinary?: {
@@ -71,7 +73,15 @@ export interface UserProfile {
   totalLikes?: number;
   totalViews?: number;
   isGuest?: boolean;
+  accountStatus?: 'active' | 'deactivated' | 'pending_deletion';
+  deactivatedAt?: number | null;
+  deletionScheduledAt?: number | null;
+  deletionDays?: 7 | 30 | null;
+  isAccountHidden?: boolean;
+  preferredLanguage?: AppLanguage;
 }
+
+export type AppLanguage = 'hi' | 'en';
 
 export interface FeedbackItem {
   id: string;
@@ -92,6 +102,8 @@ export interface StorySlide {
   caption?: string;
   soundTitle?: string;
   createdAt: string;
+  timestamp?: number; // epoch ms when posted
+  expiresAt?: number; // epoch ms when story expires (timestamp + 24h)
   cloudinary?: {
     publicId: string;
     resourceType: 'video' | 'image';
@@ -112,7 +124,47 @@ export interface StoryItem {
   userAvatar: string;
   isMyStory?: boolean;
   hasUnseen?: boolean;
+  timestamp?: number;
+  isAccountHidden?: boolean;
   slides: StorySlide[];
+}
+
+export interface NotificationItem {
+  id: string;
+  type: 'like' | 'comment' | 'follow';
+  actorUid: string;
+  actorUsername: string;
+  actorName?: string;
+  actorAvatar?: string;
+  recipientUid: string;
+  reelId?: string;
+  reelTitle?: string;
+  commentText?: string;
+  message: string;
+  read: boolean;
+  createdAt: number;
+}
+
+export interface BlockedUserEntry {
+  blockId: string;
+  blockerUid: string;
+  blockerUsername: string;
+  blockedUid?: string;
+  blockedUsername: string;
+  blockedName?: string;
+  blockedAvatar?: string;
+  blockedAt: number;
+}
+
+export interface FollowListUser {
+  uid?: string;
+  username: string;
+  name: string;
+  avatarUrl: string;
+  bio?: string;
+  isBlueTick?: boolean;
+  isPrivate?: boolean;
+  followedAt?: number;
 }
 
 export type ActiveTab = 'Home' | 'Search' | 'Create' | 'Reels' | 'Profile';

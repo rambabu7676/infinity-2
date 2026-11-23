@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useRef, useEffect, useCallback } from 'react';
 import {
   Camera,
   RotateCcw,
@@ -6,16 +6,22 @@ import {
   Music,
   Check,
   X,
-  Volume2,
-  AlertCircle,
   Radio,
   Zap,
-  Sliders
+  ZapOff,
+  Timer,
+  Image as ImageIcon,
+  Loader2,
 } from 'lucide-react';
 import { CreateMode, ReelItem } from '../types';
 import { SOUND_TRACKS } from '../data/mockReels';
 import { playClickSound, playShutterSound } from '../utils/audio';
-import { uploadMediaToCloudinary } from '../utils/cloudinary';
+import { uploadMediaToCloudinary, CloudinaryUploadResult } from '../utils/cloudinary';
+import { useLanguage } from '../i18n/LanguageContext';
+
+const MAX_RECORDING_SECONDS = 60;
+
+type TimerOption = 0 | 3 | 7;
 
 interface CameraCreateViewProps {
   createMode: CreateMode;
@@ -24,110 +30,481 @@ interface CameraCreateViewProps {
   userProfileName: string;
   userProfileUsername: string;
   onOpenUploadModal: () => void;
+  onRecordingChange?: (isRecording: boolean) => void;
 }
 
 export const CameraCreateView: React.FC<CameraCreateViewProps> = ({
   createMode,
   setCreateMode,
   onPublishReel,
-  userProfileName,
   userProfileUsername,
-  onOpenUploadModal,
+  onRecordingChange,
 }) => {
+  const { language } = useLanguage();
+  const isHi = language === 'hi';
+
   const [hasCameraAccess, setHasCameraAccess] = useState<boolean | null>(null);
+  const [isStartingCamera, setIsStartingCamera] = useState<boolean>(true);
   const [selectedSound, setSelectedSound] = useState(SOUND_TRACKS[0]);
   const [showSoundModal, setShowSoundModal] = useState(false);
+
+  // Recording & Countdown states
   const [isRecording, setIsRecording] = useState(false);
   const [recordingSeconds, setRecordingSeconds] = useState(0);
-  const [capturedVideo, setCapturedVideo] = useState<string | null>(null);
-  const [newCaption, setNewCaption] = useState('');
-  const [cameraFacingMode, setCameraFacingMode] = useState<'user' | 'environment'>('user');
+  const [timerOption, setTimerOption] = useState<TimerOption>(0);
+  const [countdownRemaining, setCountdownRemaining] = useState<number | null>(null);
+
+  // Camera hardware states (Front/Rear & Torch/Flash)
+  const [cameraFacingMode, setCameraFacingMode] = useState<'user' | 'environment'>('environment');
+  const [isTorchSupported, setIsTorchSupported] = useState(false);
+  const [isTorchEnabled, setIsTorchEnabled] = useState(false);
+  const [cameraNotice, setCameraNotice] = useState<string | null>(null);
+
+  // Filter & Preview states
   const [activeFilter, setActiveFilter] = useState<'normal' | 'cyberpunk' | 'warm' | 'vintage'>('normal');
+  const [capturedMediaUrl, setCapturedMediaUrl] = useState<string | null>(null);
+  const [capturedMediaType, setCapturedMediaType] = useState<'video' | 'image'>('video');
+  const [capturedBlob, setCapturedBlob] = useState<Blob | null>(null);
+  const [newCaption, setNewCaption] = useState('');
+  const [isPublishing, setIsPublishing] = useState(false);
   const [showLiveNotice, setShowLiveNotice] = useState(false);
-  const [liveStreamActive, setLiveStreamActive] = useState(false);
 
   const videoPreviewRef = useRef<HTMLVideoElement>(null);
   const streamRef = useRef<MediaStream | null>(null);
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const recordedChunksRef = useRef<BlobPart[]>([]);
   const timerRef = useRef<number | null>(null);
-  const nativeCameraInputRef = useRef<HTMLInputElement>(null);
+  const countdownIntervalRef = useRef<number | null>(null);
+  const noticeTimeoutRef = useRef<number | null>(null);
+  const galleryInputRef = useRef<HTMLInputElement>(null);
+  const isMountedRef = useRef<boolean>(true);
+  const capturedMediaUrlRef = useRef<string | null>(null);
+  const handleStopRecordRef = useRef<() => void>(() => {});
 
-  const handleNativeFileSelected = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
+  capturedMediaUrlRef.current = capturedMediaUrl;
 
-    playShutterSound();
-    const objectUrl = URL.createObjectURL(file);
-    setCapturedVideo(objectUrl);
-  };
-
-  // Initialize camera if possible
-  const startCamera = async () => {
-    try {
-      if (streamRef.current) {
-        streamRef.current.getTracks().forEach((t) => t.stop());
-      }
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: cameraFacingMode },
-        audio: false,
-      });
-      streamRef.current = stream;
-      if (videoPreviewRef.current) {
-        videoPreviewRef.current.srcObject = stream;
-        videoPreviewRef.current.play();
-      }
-      setHasCameraAccess(true);
-    } catch {
-      setHasCameraAccess(false);
-    }
-  };
+  const isBusyCapturing = isRecording || countdownRemaining !== null;
 
   useEffect(() => {
-    startCamera();
+    onRecordingChange?.(isBusyCapturing);
+  }, [isBusyCapturing, onRecordingChange]);
+
+  useEffect(() => {
     return () => {
-      if (streamRef.current) {
-        streamRef.current.getTracks().forEach((t) => t.stop());
-      }
-      if (timerRef.current) {
-        clearInterval(timerRef.current);
-      }
+      onRecordingChange?.(false);
     };
-  }, [cameraFacingMode]);
+  }, [onRecordingChange]);
 
-  // Handle Recording logic
-  const handleToggleRecord = () => {
-    playShutterSound();
-
-    if (!isRecording) {
-      setIsRecording(true);
-      setRecordingSeconds(0);
-      timerRef.current = window.setInterval(() => {
-        setRecordingSeconds((prev) => {
-          if (prev >= 15) {
-            handleStopRecord();
-            return 15;
-          }
-          return prev + 1;
-        });
-      }, 1000);
-    } else {
-      handleStopRecord();
+  const showTempNotice = useCallback((msg: string) => {
+    setCameraNotice(msg);
+    if (noticeTimeoutRef.current) {
+      window.clearTimeout(noticeTimeoutRef.current);
     }
-  };
+    noticeTimeoutRef.current = window.setTimeout(() => {
+      setCameraNotice(null);
+      noticeTimeoutRef.current = null;
+    }, 2600);
+  }, []);
 
-  const handleStopRecord = () => {
+  const revokeCapturedMediaUrl = useCallback((url: string | null) => {
+    if (url && url.startsWith('blob:')) {
+      URL.revokeObjectURL(url);
+    }
+  }, []);
+
+  const applyTorchConstraint = useCallback(async (enable: boolean): Promise<boolean> => {
+    const videoTrack = streamRef.current?.getVideoTracks()[0];
+    if (!videoTrack) return false;
+    try {
+      await videoTrack.applyConstraints({
+        advanced: [{ torch: enable } as unknown as MediaTrackConstraintSet],
+      });
+      return true;
+    } catch {
+      return false;
+    }
+  }, []);
+
+  const stopCameraStream = useCallback(() => {
+    if (streamRef.current) {
+      const videoTrack = streamRef.current.getVideoTracks()[0];
+      if (videoTrack) {
+        try {
+          void videoTrack.applyConstraints({
+            advanced: [{ torch: false } as unknown as MediaTrackConstraintSet],
+          });
+        } catch {
+          // ignore cleanup torch errors
+        }
+      }
+      streamRef.current.getTracks().forEach((track) => track.stop());
+      streamRef.current = null;
+    }
+    if (videoPreviewRef.current) {
+      videoPreviewRef.current.srcObject = null;
+    }
+  }, []);
+
+  const startCamera = useCallback(
+    async (facing: 'user' | 'environment' = cameraFacingMode) => {
+      setIsStartingCamera(true);
+      setIsTorchEnabled(false);
+      setIsTorchSupported(false);
+
+      if (
+        typeof navigator === 'undefined' ||
+        !navigator.mediaDevices ||
+        typeof navigator.mediaDevices.getUserMedia !== 'function'
+      ) {
+        setHasCameraAccess(false);
+        setIsStartingCamera(false);
+        return;
+      }
+
+      stopCameraStream();
+
+      let stream: MediaStream | null = null;
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({
+          video: { facingMode: { ideal: facing } },
+          audio: true,
+        });
+      } catch (err) {
+        const errName = err instanceof DOMException ? err.name : '';
+        if (errName === 'NotAllowedError' || errName === 'PermissionDeniedError') {
+          if (isMountedRef.current) {
+            setHasCameraAccess(false);
+            setIsStartingCamera(false);
+          }
+          return;
+        }
+        // Fallback: retry video-only if microphone permission/hardware failed
+        try {
+          stream = await navigator.mediaDevices.getUserMedia({
+            video: { facingMode: { ideal: facing } },
+            audio: false,
+          });
+        } catch {
+          if (isMountedRef.current) {
+            setHasCameraAccess(false);
+            setIsStartingCamera(false);
+          }
+          return;
+        }
+      }
+
+      if (!isMountedRef.current) {
+        stream.getTracks().forEach((track) => track.stop());
+        return;
+      }
+
+      streamRef.current = stream;
+
+      // Detect hardware torch capability on active video track
+      const videoTrack = stream.getVideoTracks()[0];
+      let torchCapable = false;
+      if (videoTrack && typeof videoTrack.getCapabilities === 'function') {
+        try {
+          const caps = videoTrack.getCapabilities() as MediaTrackCapabilities & { torch?: boolean };
+          torchCapable = Boolean(caps && caps.torch);
+        } catch {
+          torchCapable = false;
+        }
+      }
+      setIsTorchSupported(torchCapable);
+
+      if (videoPreviewRef.current) {
+        videoPreviewRef.current.srcObject = stream;
+        void videoPreviewRef.current.play().catch(() => {});
+      }
+
+      setHasCameraAccess(true);
+      setIsStartingCamera(false);
+    },
+    [cameraFacingMode, stopCameraStream]
+  );
+
+  // Ensure <video> always receives the stream if mounted after stream acquisition
+  useEffect(() => {
+    if (hasCameraAccess && streamRef.current && videoPreviewRef.current) {
+      if (videoPreviewRef.current.srcObject !== streamRef.current) {
+        videoPreviewRef.current.srcObject = streamRef.current;
+      }
+      void videoPreviewRef.current.play().catch(() => {});
+    }
+  }, [hasCameraAccess]);
+
+  useEffect(() => {
+    isMountedRef.current = true;
+    void startCamera(cameraFacingMode);
+
+    return () => {
+      isMountedRef.current = false;
+      if (timerRef.current) {
+        window.clearInterval(timerRef.current);
+        timerRef.current = null;
+      }
+      if (countdownIntervalRef.current) {
+        window.clearInterval(countdownIntervalRef.current);
+        countdownIntervalRef.current = null;
+      }
+      if (noticeTimeoutRef.current) {
+        window.clearTimeout(noticeTimeoutRef.current);
+        noticeTimeoutRef.current = null;
+      }
+      if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
+        try {
+          mediaRecorderRef.current.stop();
+        } catch {
+          // ignore
+        }
+      }
+      stopCameraStream();
+      revokeCapturedMediaUrl(capturedMediaUrlRef.current);
+    };
+  }, [cameraFacingMode, startCamera, stopCameraStream, revokeCapturedMediaUrl]);
+
+  const handleStopRecord = useCallback(() => {
     if (timerRef.current) {
-      clearInterval(timerRef.current);
+      window.clearInterval(timerRef.current);
       timerRef.current = null;
     }
     setIsRecording(false);
 
-    // Simulate captured recording ready for publishing
-    setCapturedVideo(
-      'https://assets.mixkit.co/videos/preview/mixkit-hands-of-a-man-playing-a-synthesizer-41617-large.mp4'
+    if (isTorchEnabled && isTorchSupported) {
+      void applyTorchConstraint(false);
+      setIsTorchEnabled(false);
+    }
+
+    const recorder = mediaRecorderRef.current;
+    if (recorder && recorder.state !== 'inactive') {
+      try {
+        recorder.stop();
+      } catch {
+        // ignore stop failure
+      }
+    }
+  }, [applyTorchConstraint, isTorchEnabled, isTorchSupported]);
+
+  handleStopRecordRef.current = handleStopRecord;
+
+  const beginActualRecording = useCallback(async () => {
+    const stream = streamRef.current;
+    if (!stream || !hasCameraAccess) {
+      showTempNotice(isHi ? 'कैमरा की अनुमति दें' : 'Allow camera permission first');
+      return;
+    }
+
+    if (typeof MediaRecorder === 'undefined') {
+      showTempNotice(
+        isHi
+          ? 'यह ब्राउज़र वीडियो रिकॉर्डिंग सपोर्ट नहीं करता'
+          : 'Video recording is not supported in this browser'
+      );
+      return;
+    }
+
+    if (isTorchEnabled && isTorchSupported) {
+      const ok = await applyTorchConstraint(true);
+      if (!ok) {
+        setIsTorchSupported(false);
+        setIsTorchEnabled(false);
+        showTempNotice(isHi ? 'इस फ़ोन में लाइट उपलब्ध नहीं' : 'Light is not available on this phone');
+      }
+    }
+
+    recordedChunksRef.current = [];
+    const candidateTypes = [
+      'video/webm;codecs=vp9,opus',
+      'video/webm;codecs=vp8,opus',
+      'video/webm',
+      'video/mp4',
+    ];
+    const supportedType = candidateTypes.find(
+      (type) => typeof MediaRecorder.isTypeSupported === 'function' && MediaRecorder.isTypeSupported(type)
     );
+
+    let recorder: MediaRecorder;
+    try {
+      recorder = supportedType
+        ? new MediaRecorder(stream, { mimeType: supportedType })
+        : new MediaRecorder(stream);
+    } catch {
+      try {
+        recorder = new MediaRecorder(stream);
+      } catch {
+        showTempNotice(
+          isHi ? 'रिकॉर्डिंग शुरू नहीं हो पाई' : 'Could not start recording'
+        );
+        return;
+      }
+    }
+
+    mediaRecorderRef.current = recorder;
+
+    recorder.ondataavailable = (event: BlobEvent) => {
+      if (event.data && event.data.size > 0) {
+        recordedChunksRef.current.push(event.data);
+      }
+    };
+
+    recorder.onstop = () => {
+      if (!isMountedRef.current) return;
+      const chunks = recordedChunksRef.current;
+      recordedChunksRef.current = [];
+      mediaRecorderRef.current = null;
+
+      if (chunks.length === 0) return;
+
+      const mimeType = recorder.mimeType || supportedType || 'video/webm';
+      const blob = new Blob(chunks, { type: mimeType });
+      revokeCapturedMediaUrl(capturedMediaUrlRef.current);
+      const url = URL.createObjectURL(blob);
+      setCapturedMediaType('video');
+      setCapturedBlob(blob);
+      setCapturedMediaUrl(url);
+    };
+
+    try {
+      recorder.start(250);
+    } catch {
+      showTempNotice(isHi ? 'रिकॉर्डिंग शुरू नहीं हो पाई' : 'Could not start recording');
+      return;
+    }
+
+    setIsRecording(true);
+    setRecordingSeconds(0);
+
+    if (timerRef.current) {
+      window.clearInterval(timerRef.current);
+    }
+
+    timerRef.current = window.setInterval(() => {
+      setRecordingSeconds((prev) => {
+        const next = prev + 1;
+        if (next >= MAX_RECORDING_SECONDS) {
+          window.setTimeout(() => {
+            handleStopRecordRef.current();
+          }, 0);
+          return MAX_RECORDING_SECONDS;
+        }
+        return next;
+      });
+    }, 1000);
+  }, [
+    applyTorchConstraint,
+    hasCameraAccess,
+    handleStopRecord,
+    isHi,
+    isTorchEnabled,
+    isTorchSupported,
+    revokeCapturedMediaUrl,
+    showTempNotice,
+  ]);
+
+  const handleCancelCountdown = useCallback(() => {
+    playClickSound();
+    if (countdownIntervalRef.current) {
+      window.clearInterval(countdownIntervalRef.current);
+      countdownIntervalRef.current = null;
+    }
+    setCountdownRemaining(null);
+  }, []);
+
+  const handleToggleRecord = () => {
+    playShutterSound();
+
+    if (countdownRemaining !== null) {
+      handleCancelCountdown();
+      return;
+    }
+
+    if (isRecording) {
+      handleStopRecord();
+      return;
+    }
+
+    if (!hasCameraAccess || !streamRef.current) {
+      void startCamera(cameraFacingMode);
+      return;
+    }
+
+    if (timerOption > 0) {
+      setCountdownRemaining(timerOption);
+      if (countdownIntervalRef.current) {
+        window.clearInterval(countdownIntervalRef.current);
+      }
+      countdownIntervalRef.current = window.setInterval(() => {
+        setCountdownRemaining((prev) => {
+          if (prev === null) return null;
+          if (prev <= 1) {
+            if (countdownIntervalRef.current) {
+              window.clearInterval(countdownIntervalRef.current);
+              countdownIntervalRef.current = null;
+            }
+            window.setTimeout(() => {
+              void beginActualRecording();
+            }, 0);
+            return null;
+          }
+          return prev - 1;
+        });
+      }, 1000);
+    } else {
+      void beginActualRecording();
+    }
+  };
+
+  const handleCycleTimer = () => {
+    if (isBusyCapturing) return;
+    playClickSound();
+    setTimerOption((prev) => (prev === 0 ? 3 : prev === 3 ? 7 : 0));
+  };
+
+  const handleToggleTorch = async () => {
+    playClickSound();
+    if (!hasCameraAccess || !isTorchSupported) {
+      showTempNotice(
+        isHi ? 'इस फ़ोन में लाइट उपलब्ध नहीं' : 'Light is not available on this phone'
+      );
+      return;
+    }
+
+    const next = !isTorchEnabled;
+    const ok = await applyTorchConstraint(next);
+    if (!ok) {
+      setIsTorchSupported(false);
+      setIsTorchEnabled(false);
+      showTempNotice(
+        isHi ? 'इस फ़ोन में लाइट उपलब्ध नहीं' : 'Light is not available on this phone'
+      );
+      return;
+    }
+    setIsTorchEnabled(next);
+  };
+
+  const handleFlipCamera = () => {
+    if (isBusyCapturing) return;
+    playClickSound();
+    setCameraFacingMode((prev) => (prev === 'user' ? 'environment' : 'user'));
+  };
+
+  const handleGalleryFileSelected = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.target.value = '';
+    if (!file) return;
+
+    playShutterSound();
+    const isImage = file.type.startsWith('image/');
+    revokeCapturedMediaUrl(capturedMediaUrlRef.current);
+    const objectUrl = URL.createObjectURL(file);
+    setCapturedMediaType(isImage ? 'image' : 'video');
+    setCapturedBlob(file);
+    setCapturedMediaUrl(objectUrl);
   };
 
   const handleModeChange = (mode: CreateMode) => {
+    if (isBusyCapturing) return;
     playClickSound();
     if (mode === 'Live') {
       setShowLiveNotice(true);
@@ -136,33 +513,50 @@ export const CameraCreateView: React.FC<CameraCreateViewProps> = ({
     }
   };
 
-  const handleFlipCamera = () => {
-    playClickSound();
-    setCameraFacingMode((prev) => (prev === 'user' ? 'environment' : 'user'));
+  const handleDiscardCaptured = () => {
+    if (isPublishing) return;
+    revokeCapturedMediaUrl(capturedMediaUrl);
+    setCapturedMediaUrl(null);
+    setCapturedBlob(null);
+    setRecordingSeconds(0);
   };
 
   const handlePublish = async () => {
+    if (!capturedMediaUrl || isPublishing) return;
     playClickSound();
+    setIsPublishing(true);
 
-    let finalVideoUrl = capturedVideo || 'https://assets.mixkit.co/videos/preview/mixkit-hands-of-a-man-playing-a-synthesizer-41617-large.mp4';
-    let finalPosterUrl = 'https://images.unsplash.com/photo-1518709268805-4e9042af9f23?w=600&auto=format&fit=crop&q=80';
-    let cloudinaryData = undefined;
+    let finalVideoUrl = capturedMediaUrl;
+    let finalPosterUrl =
+      capturedMediaType === 'image'
+        ? capturedMediaUrl
+        : 'https://images.unsplash.com/photo-1518709268805-4e9042af9f23?w=600&auto=format&fit=crop&q=80';
+    let cloudinaryData: CloudinaryUploadResult | undefined = undefined;
 
-    if (capturedVideo && (capturedVideo.startsWith('blob:') || capturedVideo.startsWith('data:'))) {
-      try {
-        const response = await fetch(capturedVideo);
-        const blob = await response.blob();
-        const result = await uploadMediaToCloudinary(blob, {
+    try {
+      const uploadBlob =
+        capturedBlob ||
+        (capturedMediaUrl.startsWith('blob:') || capturedMediaUrl.startsWith('data:')
+          ? await (await fetch(capturedMediaUrl)).blob()
+          : null);
+
+      if (uploadBlob) {
+        const result = await uploadMediaToCloudinary(uploadBlob, {
           folder: createMode === 'Post' ? 'posts' : 'reels',
-          resourceType: 'video',
+          resourceType: capturedMediaType === 'image' ? 'image' : 'video',
           maxDimension: 1080,
         });
 
         finalVideoUrl = result.optimizedUrl || result.secureUrl;
-        finalPosterUrl = result.thumbnailUrl || finalPosterUrl;
+        finalPosterUrl =
+          result.thumbnailUrl ||
+          (capturedMediaType === 'image' ? result.secureUrl : finalPosterUrl);
         cloudinaryData = result;
-      } catch (err) {
-        console.warn('Cloudinary upload fallback:', err);
+      }
+    } catch (err) {
+      console.warn('Cloudinary upload fallback:', err);
+      if (capturedMediaType === 'image') {
+        finalPosterUrl = finalVideoUrl;
       }
     }
 
@@ -176,7 +570,8 @@ export const CameraCreateView: React.FC<CameraCreateViewProps> = ({
       shares: '0',
       title: newCaption.trim() || `${createMode} by @${userProfileUsername} ✨`,
       user: userProfileUsername,
-      userAvatar: 'https://images.unsplash.com/photo-1506794778202-cad84cf45f1d?w=150&auto=format&fit=crop&q=80',
+      userAvatar:
+        'https://images.unsplash.com/photo-1506794778202-cad84cf45f1d?w=150&auto=format&fit=crop&q=80',
       isVerified: false,
       videoUrl: finalVideoUrl,
       posterUrl: finalPosterUrl,
@@ -192,9 +587,14 @@ export const CameraCreateView: React.FC<CameraCreateViewProps> = ({
     };
 
     onPublishReel(newReelItem);
-    setCapturedVideo(null);
+    if (finalVideoUrl !== capturedMediaUrl) {
+      revokeCapturedMediaUrl(capturedMediaUrl);
+    }
+    setCapturedMediaUrl(null);
+    setCapturedBlob(null);
     setNewCaption('');
     setRecordingSeconds(0);
+    setIsPublishing(false);
   };
 
   const getFilterStyle = () => {
@@ -210,231 +610,395 @@ export const CameraCreateView: React.FC<CameraCreateViewProps> = ({
     }
   };
 
+  const formatTimerLabel = (opt: TimerOption) => {
+    if (opt === 0) return isHi ? 'बंद' : 'Off';
+    if (opt === 3) return isHi ? '3 सेकंड' : '3s';
+    return isHi ? '7 सेकंड' : '7s';
+  };
+
+  const formatSeconds = (sec: number) => {
+    const mins = Math.floor(sec / 60);
+    const rem = sec % 60;
+    return `${mins.toString().padStart(2, '0')}:${rem.toString().padStart(2, '0')}`;
+  };
+
+  const getModeLabel = (mode: CreateMode) => {
+    if (!isHi) return mode;
+    switch (mode) {
+      case 'Post':
+        return 'पोस्ट';
+      case 'Story':
+        return 'स्टोरी';
+      case 'Reel':
+        return 'रील';
+      case 'Live':
+        return 'लाइव';
+    }
+  };
+
+  const shutterCircumference = 238;
+  const shutterProgressOffset =
+    shutterCircumference - (shutterCircumference * recordingSeconds) / MAX_RECORDING_SECONDS;
+
   return (
-    <div className="relative w-full h-full bg-[#111] flex flex-col justify-between overflow-hidden select-none">
+    <div className="relative w-full h-full bg-[#0A0A0D] flex flex-col justify-between overflow-hidden select-none">
       {/* Top Bar inside Camera */}
-      <div className="relative z-20 flex items-center justify-between p-4 pt-5">
-        <button
-          onClick={handleFlipCamera}
-          className="w-10 h-10 rounded-full bg-black/40 backdrop-blur-md text-white flex items-center justify-center hover:bg-black/60 active:scale-95 transition-all"
-          title="Flip camera"
-        >
-          <RotateCcw size={18} />
-        </button>
+      <div className="relative z-20 flex items-center justify-between gap-2 px-3 pt-4 pb-2 bg-gradient-to-b from-black/80 to-transparent">
+        {/* Left: Flip Camera + Torch / Flash */}
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={handleFlipCamera}
+            disabled={isBusyCapturing}
+            className="w-10 h-10 rounded-full bg-black/65 border border-white/20 text-white flex items-center justify-center hover:bg-black/85 active:scale-95 transition-all disabled:opacity-40"
+            title={isHi ? 'कैमरा बदलें' : 'Flip camera'}
+            aria-label={isHi ? 'कैमरा बदलें' : 'Flip camera'}
+          >
+            <RotateCcw size={18} />
+          </button>
 
-        {/* Sound Picker Button matching prompt */}
-        <button
-          onClick={() => {
-            playClickSound();
-            setShowSoundModal(true);
-          }}
-          className="px-4 py-2 rounded-full bg-black/60 backdrop-blur-md text-white text-xs font-bold flex items-center gap-1.5 border border-white/10 hover:border-white/30 active:scale-95 transition-all"
-        >
-          <Music size={13} className="text-[#00FF88]" />
-          <span className="max-w-[150px] truncate">{selectedSound.title}</span>
-        </button>
+          <button
+            type="button"
+            onClick={handleToggleTorch}
+            className={`w-10 h-10 rounded-full border flex items-center justify-center active:scale-95 transition-all ${
+              !hasCameraAccess || !isTorchSupported
+                ? 'bg-black/45 border-white/10 text-white/60 opacity-40'
+                : isTorchEnabled
+                ? 'bg-[#00FF88]/20 border-[#00FF88] text-[#00FF88] shadow-[0_0_12px_rgba(0,255,136,0.35)]'
+                : 'bg-black/65 border-white/20 text-white hover:bg-black/85'
+            }`}
+            title={isHi ? 'फ़्लैश / लाइट' : 'Flash / Light'}
+            aria-label={isHi ? 'फ़्लैश / लाइट' : 'Flash / Light'}
+          >
+            {isTorchEnabled && isTorchSupported ? <Zap size={18} /> : <ZapOff size={18} />}
+          </button>
+        </div>
 
-        {/* Filter / Preset Picker */}
-        <button
-          onClick={() => {
-            playClickSound();
-            const filters: ('normal' | 'cyberpunk' | 'warm' | 'vintage')[] = ['normal', 'cyberpunk', 'warm', 'vintage'];
-            const nextIdx = (filters.indexOf(activeFilter) + 1) % filters.length;
-            setActiveFilter(filters[nextIdx]);
-          }}
-          className={`w-10 h-10 rounded-full bg-black/40 backdrop-blur-md text-white flex items-center justify-center hover:bg-black/60 active:scale-95 transition-all ${
-            activeFilter !== 'normal' ? 'ring-2 ring-[#00FF88]' : ''
-          }`}
-          title={`Filter: ${activeFilter}`}
-        >
-          <Sparkles size={18} className={activeFilter !== 'normal' ? 'text-[#00FF88]' : ''} />
-        </button>
+        {/* Center: Sound Picker OR Active Recording Clock */}
+        {isRecording ? (
+          <div className="px-4 py-1.5 rounded-full bg-black/80 border border-[#00FF88] text-white font-mono text-xs font-bold tracking-wider flex items-center gap-2 shadow-[0_0_15px_rgba(0,255,136,0.3)]">
+            <span className="w-2.5 h-2.5 rounded-full bg-[#00FF88] animate-pulse" />
+            <span className="text-[#00FF88]">{formatSeconds(recordingSeconds)}</span>
+            <span className="text-white/50">/</span>
+            <span className="text-white/80">{formatSeconds(MAX_RECORDING_SECONDS)}</span>
+          </div>
+        ) : (
+          <button
+            type="button"
+            onClick={() => {
+              playClickSound();
+              setShowSoundModal(true);
+            }}
+            className="px-3.5 py-2 rounded-full bg-black/65 backdrop-blur-md text-white text-xs font-bold flex items-center gap-1.5 border border-white/20 hover:border-white/40 active:scale-95 transition-all max-w-[155px]"
+          >
+            <Music size={13} className="text-[#00FF88] shrink-0" />
+            <span className="truncate">{selectedSound.title}</span>
+          </button>
+        )}
+
+        {/* Right: Timer Toggle (बंद / 3 सेकंड / 7 सेकंड) + Filter */}
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={handleCycleTimer}
+            disabled={isBusyCapturing}
+            className={`h-10 px-2.5 rounded-full border text-[11px] font-bold flex items-center gap-1 active:scale-95 transition-all disabled:opacity-50 ${
+              timerOption > 0
+                ? 'bg-[#00FF88]/20 border-[#00FF88] text-[#00FF88] shadow-[0_0_12px_rgba(0,255,136,0.3)]'
+                : 'bg-black/65 border-white/20 text-white hover:bg-black/85'
+            }`}
+            title={isHi ? 'टाइमर' : 'Timer'}
+            aria-label={isHi ? 'टाइमर' : 'Timer'}
+          >
+            <Timer size={15} />
+            <span>{formatTimerLabel(timerOption)}</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => {
+              playClickSound();
+              const filters: ('normal' | 'cyberpunk' | 'warm' | 'vintage')[] = [
+                'normal',
+                'cyberpunk',
+                'warm',
+                'vintage',
+              ];
+              const nextIdx = (filters.indexOf(activeFilter) + 1) % filters.length;
+              setActiveFilter(filters[nextIdx]);
+            }}
+            className={`w-10 h-10 rounded-full border flex items-center justify-center active:scale-95 transition-all ${
+              activeFilter !== 'normal'
+                ? 'bg-[#00FF88]/20 border-[#00FF88] text-[#00FF88]'
+                : 'bg-black/65 border-white/20 text-white hover:bg-black/85'
+            }`}
+            title={`Filter: ${activeFilter}`}
+            aria-label={`Filter: ${activeFilter}`}
+          >
+            <Sparkles size={17} />
+          </button>
+        </div>
       </div>
 
       {/* Camera Viewport / Live Preview */}
       <div className="relative flex-1 bg-black flex items-center justify-center overflow-hidden">
-        {hasCameraAccess ? (
-          <video
-            ref={videoPreviewRef}
-            playsInline
-            muted
-            className={`w-full h-full object-cover ${getFilterStyle()}`}
-          />
-        ) : (
-          /* High-Tech Animated Studio Viewfinder Fallback */
-          <div className="w-full h-full bg-gradient-to-b from-[#181822] via-[#0E1015] to-[#0A0B0E] flex flex-col items-center justify-center p-6 text-center">
-            <div className="relative w-48 h-48 rounded-full border border-dashed border-emerald-500/30 flex items-center justify-center mb-4">
-              <div className="absolute inset-2 rounded-full border border-emerald-500/10 animate-ping opacity-30" />
-              <Camera size={52} className="text-[#00FF88] opacity-80" />
+        {/* Always mounted video element so stream attaches cleanly */}
+        <video
+          ref={videoPreviewRef}
+          playsInline
+          muted
+          autoPlay
+          className={`w-full h-full object-cover ${
+            cameraFacingMode === 'user' ? '-scale-x-100' : ''
+          } ${getFilterStyle()} ${hasCameraAccess ? 'block' : 'hidden'}`}
+        />
+
+        {/* Loading state while requesting camera */}
+        {hasCameraAccess === null && isStartingCamera && (
+          <div className="w-full h-full bg-[#0A0A0D] flex flex-col items-center justify-center p-6 text-center gap-3">
+            <Loader2 size={36} className="text-[#00FF88] animate-spin" />
+            <p className="text-sm font-bold text-white">
+              {isHi ? 'कैमरा चालू हो रहा है...' : 'Starting camera...'}
+            </p>
+          </div>
+        )}
+
+        {/* Clear Camera Permission Denied State */}
+        {hasCameraAccess === false && (
+          <div className="w-full h-full bg-[#0A0A0D] flex flex-col items-center justify-center p-6 text-center">
+            <div className="w-20 h-20 rounded-full bg-zinc-900 border border-white/15 flex items-center justify-center mb-4">
+              <Camera size={38} className="text-white" />
             </div>
-            <h4 className="text-white font-bold text-sm tracking-wide">Studio Camera Preview</h4>
-            <p className="text-xs text-zinc-400 max-w-xs mt-1">
-              Webcam simulated viewfinder. Ready to record high-frame rate {createMode}!
+            <h4 className="text-white font-extrabold text-base tracking-tight">
+              {isHi ? 'कैमरा की अनुमति दें' : 'Allow Camera Permission'}
+            </h4>
+            <p className="text-xs text-zinc-400 max-w-xs mt-1.5 leading-relaxed">
+              {isHi
+                ? 'रील या पोस्ट रिकॉर्ड करने के लिए फ़ोन के कैमरे की अनुमति चालू करें, या नीचे गैलरी से फ़ोटो/वीडियो चुनें।'
+                : 'Allow camera access to record reels or posts, or pick a photo/video from the gallery below.'}
             </p>
             <button
-              onClick={startCamera}
-              className="mt-3 px-3 py-1.5 rounded-full bg-white/10 hover:bg-white/20 text-zinc-200 text-xs transition-colors"
+              type="button"
+              onClick={() => {
+                playClickSound();
+                void startCamera(cameraFacingMode);
+              }}
+              className="mt-5 px-5 py-2.5 rounded-full bg-white text-black hover:bg-zinc-200 active:scale-95 text-xs font-extrabold transition-all shadow-lg"
             >
-              Request Camera Permission
+              {isHi ? 'कैमरा की अनुमति दें' : 'Allow Camera Permission'}
             </button>
           </div>
         )}
 
-        {/* Viewfinder crosshairs and HUD */}
-        <div className="absolute inset-4 pointer-events-none border border-white/10 rounded-2xl flex flex-col justify-between p-3">
-          <div className="flex justify-between items-center text-[10px] text-white/50 font-mono">
-            <span>ISO 400 · 4K 60FPS</span>
-            <span>0-∞ INFINITY CAM</span>
+        {/* Inline Notice Toast (e.g., 'इस फ़ोन में लाइट उपलब्ध नहीं') */}
+        {cameraNotice && (
+          <div className="absolute top-4 left-1/2 -translate-x-1/2 z-30 px-4 py-2 rounded-full bg-black/90 border border-white/25 text-white text-xs font-bold shadow-2xl whitespace-nowrap animate-fadeIn">
+            {cameraNotice}
           </div>
+        )}
 
-          {/* Recording Timer Banner */}
-          {isRecording && (
-            <div className="self-center px-4 py-1.5 rounded-full bg-red-600/90 text-white font-mono text-xs font-bold tracking-widest flex items-center gap-2 animate-pulse shadow-lg">
-              <span className="w-2.5 h-2.5 rounded-full bg-white animate-ping" />
-              00:{recordingSeconds.toString().padStart(2, '0')} / 00:15
+        {/* Countdown Overlay (3, 2, 1...) with Cancel Button */}
+        {countdownRemaining !== null && (
+          <div className="absolute inset-0 z-30 bg-black/60 backdrop-blur-[2px] flex flex-col items-center justify-center gap-6">
+            <div className="w-36 h-36 rounded-full border-4 border-[#00FF88] bg-black/60 flex items-center justify-center shadow-[0_0_40px_rgba(0,255,136,0.4)]">
+              <span className="text-7xl font-black text-[#00FF88] tabular-nums">
+                {countdownRemaining}
+              </span>
             </div>
-          )}
-
-          <div className="flex justify-between items-center text-[10px] text-white/50 font-mono">
-            <span>FILTER: {activeFilter.toUpperCase()}</span>
-            <span>AUDIO: SYNC</span>
+            <button
+              type="button"
+              onClick={handleCancelCountdown}
+              className="px-6 py-2.5 rounded-full bg-white text-black hover:bg-zinc-200 active:scale-95 text-xs font-extrabold shadow-lg transition-all"
+            >
+              {isHi ? 'रद्द करें' : 'Cancel'}
+            </button>
           </div>
-        </div>
+        )}
+
+        {/* Minimal HUD Info */}
+        {hasCameraAccess && countdownRemaining === null && (
+          <div className="absolute bottom-3 left-3 right-3 pointer-events-none flex justify-between items-center text-[10px] text-white/60 font-mono">
+            <span>
+              {cameraFacingMode === 'user'
+                ? isHi
+                  ? 'फ़्रंट कैमरा'
+                  : 'FRONT CAM'
+                : isHi
+                ? 'रियर कैमरा'
+                : 'REAR CAM'}
+            </span>
+            {activeFilter !== 'normal' && (
+              <span className="text-[#00FF88] font-bold uppercase">
+                {activeFilter}
+              </span>
+            )}
+          </div>
+        )}
       </div>
 
       {/* Shutter & Controls Section */}
-      <div className="relative z-20 py-4 flex flex-col items-center">
-        {/* Shutter Button Matching React Native specs + Device Gallery Upload Button */}
-        <div className="relative flex items-center justify-center gap-7 mb-3">
-          {/* Gallery Upload Button (Device Video) */}
-          {/* Hidden input for Native Camera direct launch */}
-          <input
-            ref={nativeCameraInputRef}
-            type="file"
-            accept="video/*"
-            capture="environment"
-            className="hidden"
-            onChange={handleNativeFileSelected}
-          />
+      <div className="relative z-20 pt-4 pb-2 bg-[#0A0A0D] flex flex-col items-center">
+        {/* Hidden Gallery File Picker for Photos & Videos */}
+        <input
+          ref={galleryInputRef}
+          type="file"
+          accept="image/*,video/*"
+          className="hidden"
+          onChange={handleGalleryFileSelected}
+        />
 
-          {/* Left Gallery Button */}
+        <div className="relative w-full px-6 flex items-center justify-between mb-3">
+          {/* Bottom-Left Small Gallery Button (Photos & Videos) */}
           <button
+            type="button"
+            disabled={isBusyCapturing}
             onClick={() => {
               playClickSound();
-              onOpenUploadModal();
+              galleryInputRef.current?.click();
             }}
-            className="w-10 h-10 rounded-xl bg-zinc-800/80 hover:bg-zinc-700 border border-zinc-700 flex flex-col items-center justify-center text-zinc-300 hover:text-white active:scale-95 transition-all shadow-md group"
-            title="Upload video from device gallery"
+            className="w-12 h-12 rounded-xl bg-zinc-900 hover:bg-zinc-800 border border-white/25 flex flex-col items-center justify-center text-white active:scale-95 transition-all shadow-md disabled:opacity-40"
+            title={isHi ? 'गैलरी से फ़ोटो या वीडियो चुनें' : 'Choose photo or video from gallery'}
+            aria-label={isHi ? 'गैलरी' : 'Gallery'}
           >
-            <div className="w-4 h-4 rounded border border-dashed border-emerald-400/80 flex items-center justify-center mb-0.5">
-              <span className="text-[9px] text-emerald-400 font-bold">+</span>
-            </div>
-            <span className="text-[8px] font-semibold text-zinc-400 group-hover:text-white">Gallery</span>
+            <ImageIcon size={18} className="text-white" />
+            <span className="text-[9px] font-bold text-white mt-0.5">
+              {isHi ? 'गैलरी' : 'Gallery'}
+            </span>
           </button>
 
-          {/* Direct Native Camera Button (Instant Phone Camera Launch) */}
-          <button
-            onClick={() => {
-              playClickSound();
-              nativeCameraInputRef.current?.click();
-            }}
-            className="w-10 h-10 rounded-xl bg-gradient-to-tr from-emerald-500/20 to-cyan-500/20 hover:from-emerald-500/30 hover:to-cyan-500/30 border border-emerald-400/50 flex flex-col items-center justify-center text-emerald-300 hover:text-white active:scale-95 transition-all shadow-md group"
-            title="Launch native device camera directly"
-          >
-            <Camera size={15} className="text-[#00FF88] group-hover:scale-110 transition-transform" />
-            <span className="text-[8px] font-bold text-[#00FF88] mt-0.5">Camera</span>
-          </button>
-
-          {/* Center Shutter Button */}
+          {/* Center Large Round Record Button */}
           <div className="relative flex items-center justify-center">
-            {/* Progress Ring during recording */}
             {isRecording && (
-              <svg className="absolute w-[86px] h-[86px] -rotate-90 pointer-events-none">
+              <svg className="absolute w-[88px] h-[88px] -rotate-90 pointer-events-none">
                 <circle
-                  cx="43"
-                  cy="43"
+                  cx="44"
+                  cy="44"
+                  r="38"
+                  fill="none"
+                  stroke="rgba(255,255,255,0.2)"
+                  strokeWidth="4"
+                />
+                <circle
+                  cx="44"
+                  cy="44"
                   r="38"
                   fill="none"
                   stroke="#00FF88"
                   strokeWidth="4"
-                  strokeDasharray="238"
-                  strokeDashoffset={238 - (238 * recordingSeconds) / 15}
+                  strokeLinecap="round"
+                  strokeDasharray={shutterCircumference}
+                  strokeDashoffset={shutterProgressOffset}
                   className="transition-all duration-1000 ease-linear"
                 />
               </svg>
             )}
 
             <button
+              type="button"
               onClick={handleToggleRecord}
-              className={`w-[70px] h-[70px] rounded-full border-4 border-white flex items-center justify-center transition-transform active:scale-90 shadow-[0_0_20px_rgba(255,0,80,0.5)] ${
-                isRecording ? 'bg-red-600 scale-105' : 'bg-[#FF0050]'
+              className={`w-[72px] h-[72px] rounded-full border-4 flex items-center justify-center transition-all active:scale-90 ${
+                isRecording
+                  ? 'border-[#00FF88] bg-[#00FF88]/20 shadow-[0_0_24px_rgba(0,255,136,0.45)]'
+                  : countdownRemaining !== null
+                  ? 'border-[#00FF88] bg-zinc-900'
+                  : 'border-white bg-white/15 hover:bg-white/25 shadow-[0_0_20px_rgba(255,255,255,0.18)]'
               }`}
-              aria-label="Record button"
+              aria-label={
+                isRecording
+                  ? isHi
+                    ? 'रिकॉर्डिंग रोकें'
+                    : 'Stop recording'
+                  : isHi
+                  ? 'रिकॉर्डिंग शुरू करें'
+                  : 'Start recording'
+              }
             >
               {isRecording ? (
-                <div className="w-6 h-6 rounded-sm bg-white" />
+                <div className="w-6 h-6 rounded-sm bg-[#00FF88]" />
               ) : (
-                <div className="w-4 h-4 rounded-full bg-white opacity-40" />
+                <div className="w-12 h-12 rounded-full bg-white" />
               )}
             </button>
           </div>
 
-          {/* Quick Flip camera button */}
+          {/* Right: Quick Camera Flip */}
           <button
+            type="button"
+            disabled={isBusyCapturing}
             onClick={handleFlipCamera}
-            className="w-11 h-11 rounded-xl bg-zinc-800/80 hover:bg-zinc-700 border border-zinc-700 flex flex-col items-center justify-center text-zinc-300 hover:text-white active:scale-95 transition-all shadow-md"
-            title="Flip camera"
+            className="w-12 h-12 rounded-xl bg-zinc-900 hover:bg-zinc-800 border border-white/25 flex flex-col items-center justify-center text-white active:scale-95 transition-all shadow-md disabled:opacity-40"
+            title={isHi ? 'कैमरा पलटें' : 'Flip camera'}
+            aria-label={isHi ? 'कैमरा पलटें' : 'Flip camera'}
           >
-            <RotateCcw size={16} />
-            <span className="text-[9px] font-semibold text-zinc-400 mt-0.5">Flip</span>
+            <RotateCcw size={17} className="text-white" />
+            <span className="text-[9px] font-bold text-white mt-0.5">
+              {isHi ? 'पलटें' : 'Flip'}
+            </span>
           </button>
         </div>
 
-        {/* Bottom Mode Selector Bar matching React Native code: ['Post', 'Story', 'Reel', 'Live'] */}
-        <div className="w-full h-12 flex justify-around items-center bg-black border-t border-zinc-900 px-2">
-          {(['Post', 'Story', 'Reel', 'Live'] as CreateMode[]).map((mode) => (
-            <button
-              key={mode}
-              onClick={() => handleModeChange(mode)}
-              className={`text-sm font-bold px-3 py-2 transition-colors relative ${
-                createMode === mode ? 'text-white' : 'text-[#777] hover:text-zinc-400'
-              }`}
-            >
-              {mode}
-              {createMode === mode && (
-                <div className="absolute bottom-0 left-2 right-2 h-0.5 bg-white rounded-full" />
-              )}
-            </button>
-          ))}
+        {/* Bottom Mode Selector Bar */}
+        <div className="w-full h-11 flex justify-around items-center bg-[#0A0A0D] border-t border-zinc-900 px-2">
+          {(['Post', 'Story', 'Reel', 'Live'] as CreateMode[]).map((mode) => {
+            const isActive = createMode === mode;
+            return (
+              <button
+                key={mode}
+                type="button"
+                disabled={isBusyCapturing}
+                onClick={() => handleModeChange(mode)}
+                className={`text-sm font-bold px-3 py-2 transition-colors relative disabled:opacity-40 ${
+                  isActive ? 'text-[#00FF88]' : 'text-white/70 hover:text-white'
+                }`}
+              >
+                {getModeLabel(mode)}
+                {isActive && (
+                  <div className="absolute bottom-0 left-2 right-2 h-0.5 bg-[#00FF88] rounded-full" />
+                )}
+              </button>
+            );
+          })}
         </div>
       </div>
 
-      {/* Captured Clip / Post Preview Modal */}
-      {capturedVideo && (
-        <div className="fixed inset-0 z-50 bg-black/90 backdrop-blur-md flex items-center justify-center p-4">
-          <div className="w-full max-w-sm bg-[#1A1A1A] border border-zinc-800 rounded-2xl p-5 shadow-2xl flex flex-col gap-4">
+      {/* Captured Clip / Gallery Media Preview Modal */}
+      {capturedMediaUrl && (
+        <div className="fixed inset-0 z-50 bg-black/95 backdrop-blur-md flex items-center justify-center p-4">
+          <div className="w-full max-w-sm bg-[#121216] border border-zinc-800 rounded-2xl p-5 shadow-2xl flex flex-col gap-4">
             <div className="flex items-center justify-between">
-              <h4 className="text-sm font-bold text-white">Preview & Publish {createMode}</h4>
+              <h4 className="text-sm font-bold text-white">
+                {isHi
+                  ? `प्रीव्यू और पब्लिश (${getModeLabel(createMode)})`
+                  : `Preview & Publish ${createMode}`}
+              </h4>
               <button
-                onClick={() => setCapturedVideo(null)}
-                className="p-1 text-zinc-400 hover:text-white"
+                type="button"
+                disabled={isPublishing}
+                onClick={handleDiscardCaptured}
+                className="p-1 text-white/70 hover:text-white disabled:opacity-40"
               >
                 <X size={18} />
               </button>
             </div>
 
-            <div className="relative aspect-[9/12] w-full rounded-xl overflow-hidden bg-black">
-              {capturedVideo ? (
+            <div className="relative aspect-[9/12] w-full rounded-xl overflow-hidden bg-black flex items-center justify-center">
+              {capturedMediaType === 'image' ? (
+                <img
+                  src={capturedMediaUrl}
+                  alt="Preview"
+                  className="w-full h-full object-contain bg-black"
+                />
+              ) : (
                 <video
-                  src={capturedVideo}
+                  src={capturedMediaUrl}
                   autoPlay
                   loop
-                  muted
                   playsInline
+                  controls
                   className="w-full h-full object-cover"
                 />
-              ) : null}
-              <div className="absolute bottom-2 left-2 px-2.5 py-1 rounded bg-black/60 text-[10px] text-white">
+              )}
+              <div className="absolute top-2 left-2 px-2.5 py-1 rounded-full bg-black/70 text-[10px] text-white pointer-events-none">
                 🎵 {selectedSound.title}
               </div>
             </div>
@@ -443,42 +1007,60 @@ export const CameraCreateView: React.FC<CameraCreateViewProps> = ({
               type="text"
               value={newCaption}
               onChange={(e) => setNewCaption(e.target.value)}
-              placeholder="Write a caption... #Infinity #Trending"
-              className="w-full px-3 py-2 bg-zinc-900 border border-zinc-800 rounded-lg text-xs text-white placeholder-zinc-500 focus:outline-none focus:border-[#00FF88]"
+              placeholder={
+                isHi
+                  ? 'कैप्शन लिखें... #Infinity #Trending'
+                  : 'Write a caption... #Infinity #Trending'
+              }
+              className="w-full px-3 py-2.5 bg-zinc-900 border border-zinc-800 rounded-lg text-xs text-white placeholder-zinc-500 focus:outline-none focus:border-[#00FF88]"
             />
 
             <div className="flex gap-2">
               <button
-                onClick={() => setCapturedVideo(null)}
-                className="flex-1 py-2.5 rounded-lg border border-zinc-700 text-xs font-bold text-zinc-300 hover:bg-zinc-800"
+                type="button"
+                disabled={isPublishing}
+                onClick={handleDiscardCaptured}
+                className="flex-1 py-2.5 rounded-lg border border-white/25 text-xs font-bold text-white hover:bg-zinc-800 disabled:opacity-40"
               >
-                Retake
+                {isHi ? 'दोबारा लें' : 'Retake'}
               </button>
               <button
-                onClick={handlePublish}
-                className="flex-1 py-2.5 rounded-lg bg-[#00FF88] text-xs font-bold text-black hover:bg-[#00e57a]"
+                type="button"
+                disabled={isPublishing}
+                onClick={() => void handlePublish()}
+                className="flex-1 py-2.5 rounded-lg bg-[#00FF88] text-xs font-extrabold text-black hover:bg-[#00e57a] disabled:opacity-60 flex items-center justify-center gap-1.5"
               >
-                Publish Now
+                {isPublishing ? (
+                  <>
+                    <Loader2 size={14} className="animate-spin" />
+                    <span>{isHi ? 'अपलोड हो रहा है...' : 'Publishing...'}</span>
+                  </>
+                ) : (
+                  <span>{isHi ? 'पब्लिश करें' : 'Publish Now'}</span>
+                )}
               </button>
             </div>
           </div>
         </div>
       )}
 
-      {/* 🎵 Add Sound Picker Modal */}
+      {/* Sound Picker Modal */}
       {showSoundModal && (
         <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-end justify-center">
-          <div className="w-full max-w-md bg-[#1A1A1A] border-t border-zinc-800 rounded-t-2xl p-4 max-h-[70vh] flex flex-col animate-slideUp">
+          <div className="w-full max-w-md bg-[#121216] border-t border-zinc-800 rounded-t-2xl p-4 max-h-[70vh] flex flex-col animate-slideUp">
             <div className="flex items-center justify-between pb-3 border-b border-zinc-800">
               <div className="flex items-center gap-2">
                 <Music size={18} className="text-[#00FF88]" />
-                <span className="font-bold text-white text-sm">Select Sound Track</span>
+                <span className="font-bold text-white text-sm">
+                  {isHi ? 'गाना चुनें' : 'Select Sound Track'}
+                </span>
               </div>
               <button
+                type="button"
                 onClick={() => setShowSoundModal(false)}
-                className="text-xs text-zinc-400 hover:text-white"
+                className="text-xs font-bold text-white hover:text-[#00FF88]"
               >
-                Done
+                {isHi ? 'हो गया' : 'Done'}
               </button>
             </div>
 
@@ -493,12 +1075,12 @@ export const CameraCreateView: React.FC<CameraCreateViewProps> = ({
                   }}
                   className={`flex items-center justify-between p-3 rounded-xl cursor-pointer transition-colors ${
                     selectedSound.id === track.id
-                      ? 'bg-emerald-500/10 border border-emerald-500/30'
-                      : 'bg-zinc-800/50 hover:bg-zinc-800'
+                      ? 'bg-[#00FF88]/15 border border-[#00FF88]/50'
+                      : 'bg-zinc-900 hover:bg-zinc-800'
                   }`}
                 >
                   <div className="flex items-center gap-3">
-                    <div className="w-9 h-9 rounded-lg bg-zinc-700 flex items-center justify-center text-white text-xs">
+                    <div className="w-9 h-9 rounded-lg bg-zinc-800 flex items-center justify-center text-white text-xs">
                       🎵
                     </div>
                     <div>
@@ -518,25 +1100,30 @@ export const CameraCreateView: React.FC<CameraCreateViewProps> = ({
         </div>
       )}
 
-      {/* Live Notice Modal matching Alert.alert('Live Streaming', '💰 Live Feature — Coming Soon!') */}
+      {/* Live Notice Modal */}
       {showLiveNotice && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/75 backdrop-blur-sm animate-fadeIn">
-          <div className="w-full max-w-xs p-5 bg-[#1A1A1A] border border-zinc-800 rounded-2xl text-center shadow-2xl">
-            <div className="w-12 h-12 mx-auto mb-3 rounded-full bg-amber-500/20 text-amber-400 flex items-center justify-center">
+          <div className="w-full max-w-xs p-5 bg-[#121216] border border-zinc-800 rounded-2xl text-center shadow-2xl">
+            <div className="w-12 h-12 mx-auto mb-3 rounded-full bg-[#00FF88]/15 text-[#00FF88] flex items-center justify-center">
               <Radio size={24} />
             </div>
-            <h4 className="text-base font-bold text-white mb-1">Live Streaming</h4>
+            <h4 className="text-base font-bold text-white mb-1">
+              {isHi ? 'लाइव स्ट्रीमिंग' : 'Live Streaming'}
+            </h4>
             <p className="text-xs text-zinc-300 mb-4">
-              💰 Live Feature — Coming Soon!
+              {isHi ? '💰 लाइव फ़ीचर — जल्द आ रहा है!' : '💰 Live Feature — Coming Soon!'}
             </p>
             <p className="text-[11px] text-zinc-500 mb-4">
-              Creator live streaming with real-time gifts, diamond tips, and interactive chat is scheduled in the upcoming milestone!
+              {isHi
+                ? 'रियल-टाइम गिफ़्ट और चैट के साथ लाइव स्ट्रीमिंग अगले अपडेट में आएगी।'
+                : 'Creator live streaming with real-time gifts, diamond tips, and interactive chat is scheduled in the upcoming milestone!'}
             </p>
             <button
+              type="button"
               onClick={() => setShowLiveNotice(false)}
-              className="w-full py-2 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-xs font-bold text-white transition-colors"
+              className="w-full py-2 rounded-lg bg-white text-black hover:bg-zinc-200 text-xs font-bold transition-colors"
             >
-              Got it
+              {isHi ? 'समझ आ गया' : 'Got it'}
             </button>
           </div>
         </div>

@@ -6,25 +6,30 @@ import {
   BarChart3,
   Gem,
   LogOut,
-  Check,
   Cloud,
   CheckCircle2,
   AlertCircle,
   Coins,
-  Eye,
-  CheckCheck,
   MessageSquare,
   Send,
   Crown,
   Sparkles,
   Bug,
-  Lightbulb
+  Lightbulb,
+  UserX,
+  Trash2,
+  PauseCircle,
+  ShieldCheck,
+  Clock,
+  Ban,
+  Languages,
 } from 'lucide-react';
 import { playClickSound, playWinChime } from '../utils/audio';
 import { getCloudinaryConfig, uploadMediaToCloudinary, CloudinaryUploadResult } from '../utils/cloudinary';
-import { getMonetizationStats } from '../utils/monetization';
 import { saveFeedbackToFirebase } from '../firebase/services';
-import { UserProfile, FeedbackItem } from '../types';
+import { UserProfile, FeedbackItem, BlockedUserEntry, AppLanguage } from '../types';
+import { useLanguage } from '../i18n/LanguageContext';
+import { SUPPORTED_LANGUAGES } from '../i18n/translations';
 
 interface SettingsModalProps {
   isOpen: boolean;
@@ -37,6 +42,12 @@ interface SettingsModalProps {
   onOpenAuth?: () => void;
   goldenThemeEnabled?: boolean;
   onToggleGoldenTheme?: () => void;
+  onDeactivateAccount?: () => Promise<void>;
+  onScheduleDeletion?: (days: 7 | 30) => Promise<{ success: boolean; error?: string }>;
+  onCancelDeletion?: () => Promise<void>;
+  blockedUsers?: BlockedUserEntry[];
+  onUnblockUser?: (username: string) => Promise<void> | void;
+  onLanguageChange?: (lang: AppLanguage) => void;
 }
 
 export const SettingsModal: React.FC<SettingsModalProps> = ({
@@ -50,10 +61,32 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   onOpenAuth,
   goldenThemeEnabled = false,
   onToggleGoldenTheme,
+  onDeactivateAccount,
+  onScheduleDeletion,
+  onCancelDeletion,
+  blockedUsers = [],
+  onUnblockUser,
+  onLanguageChange,
 }) => {
+  const { language, setLanguage, t } = useLanguage();
   const [activeSubModal, setActiveSubModal] = useState<
-    'privacy-policy' | 'daily-limits' | 'diamonds-rules' | 'cloudinary-settings' | 'creator-monetization' | 'support-feedback' | null
+    | 'privacy-policy'
+    | 'daily-limits'
+    | 'diamonds-rules'
+    | 'cloudinary-settings'
+    | 'creator-monetization'
+    | 'support-feedback'
+    | 'account-closure'
+    | 'blocked-users'
+    | null
   >(null);
+  const [unblockingUsername, setUnblockingUsername] = useState<string | null>(null);
+  const [accountClosureStep, setAccountClosureStep] = useState<
+    'choice' | 'deactivate-confirm' | 'delete-duration' | 'delete-confirm'
+  >('choice');
+  const [selectedDeleteDays, setSelectedDeleteDays] = useState<7 | 30>(7);
+  const [accountActionLoading, setAccountActionLoading] = useState(false);
+  const [accountActionError, setAccountActionError] = useState('');
   const [testResult, setTestResult] = useState<CloudinaryUploadResult | null>(null);
   const [testStatus, setTestStatus] = useState<'idle' | 'testing' | 'success' | 'error'>('idle');
   const [errorMessage, setErrorMessage] = useState('');
@@ -72,16 +105,52 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   };
   const wordCount = getWordCount(feedbackText);
 
+  const isGuestUser = Boolean(
+    userProfile?.isGuest || !userProfile?.uid || userProfile?.uid === 'guest_user'
+  );
+  const hasPendingDeletion = Boolean(
+    !isGuestUser &&
+      userProfile?.accountStatus === 'pending_deletion' &&
+      userProfile?.deletionScheduledAt &&
+      userProfile.deletionScheduledAt > Date.now()
+  );
+
+  const formattedDeleteTargetDate = React.useMemo(() => {
+    const targetTs = Date.now() + selectedDeleteDays * 24 * 60 * 60 * 1000;
+    return new Date(targetTs).toLocaleDateString(language === 'en' ? 'en-IN' : 'hi-IN', {
+      day: 'numeric',
+      month: 'long',
+      year: 'numeric',
+    });
+  }, [selectedDeleteDays, activeSubModal, accountClosureStep, language]);
+
+  const openAccountClosureModal = () => {
+    setAccountClosureStep('choice');
+    setAccountActionError('');
+    setAccountActionLoading(false);
+    setActiveSubModal('account-closure');
+  };
+
+  const handleSelectLanguage = (nextLang: AppLanguage) => {
+    playClickSound();
+    if (onLanguageChange) {
+      onLanguageChange(nextLang);
+    } else {
+      setLanguage(nextLang);
+    }
+  };
+
   if (!isOpen) return null;
 
   return (
     <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-end sm:items-center justify-center p-0 sm:p-4 animate-fadeIn select-none">
       <div className="w-full max-w-sm bg-[#1A1A1A] border-t sm:border border-zinc-800 rounded-t-2xl sm:rounded-2xl p-5 shadow-2xl animate-slideUp max-h-[92vh] overflow-y-auto">
         <div className="flex items-center justify-between pb-3 border-b border-zinc-800 mb-2">
-          <h3 className="text-base font-bold text-white">Settings & Privacy</h3>
+          <h3 className="text-base font-bold text-white">{t.settings.title}</h3>
           <button
             onClick={onClose}
             className="p-1 text-zinc-400 hover:text-white rounded-full"
+            aria-label={t.common.close}
           >
             <X size={18} />
           </button>
@@ -97,7 +166,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
             />
             <div className="min-w-0">
               <p className="text-xs font-bold text-white truncate">
-                {userProfile?.name || 'Infinity User'}
+                {userProfile?.name || t.settings.infinityUser}
               </p>
               <p className="text-[11px] text-[#00FF88] truncate font-mono">
                 @{userProfile?.username || 'creator'}
@@ -117,9 +186,46 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
               }}
               className="ml-2 px-2.5 py-1.5 rounded-xl bg-[#00FF88]/15 hover:bg-[#00FF88]/25 text-[#00FF88] text-[11px] font-bold shrink-0 transition-colors border border-[#00FF88]/30"
             >
-              {userProfile?.email ? 'Switch / Auth' : 'Log In'}
+              {userProfile?.email ? t.settings.switchAuth : t.settings.logIn}
             </button>
           )}
+        </div>
+
+        {/* Language Section ('भाषा' / 'Language') */}
+        <div className="p-3 bg-zinc-900/90 border border-zinc-800 rounded-2xl mb-3 space-y-2">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2.5">
+              <Languages size={18} className="text-[#00FF88] shrink-0" />
+              <div>
+                <p className="text-sm font-bold text-white leading-tight">
+                  {t.settings.languageSectionTitle}
+                </p>
+                <p className="text-[11px] text-zinc-400">
+                  {t.settings.languageSubtitle}
+                </p>
+              </div>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-2 gap-2 pt-1">
+            {SUPPORTED_LANGUAGES.map((opt) => {
+              const isActive = language === opt.code;
+              return (
+                <button
+                  key={opt.code}
+                  type="button"
+                  onClick={() => handleSelectLanguage(opt.code)}
+                  className={`py-2 px-3 rounded-xl text-xs font-bold border transition-all active:scale-95 ${
+                    isActive
+                      ? 'bg-[#00FF88] border-[#00FF88] text-black shadow-sm'
+                      : 'bg-zinc-950 border-zinc-800 text-zinc-300 hover:text-white hover:border-zinc-700'
+                  }`}
+                >
+                  {opt.label}
+                </button>
+              );
+            })}
+          </div>
         </div>
 
         <div className="space-y-1">
@@ -133,7 +239,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
           >
             <div className="flex items-center gap-3">
               <Lock size={18} className="text-zinc-400" />
-              <span className="text-sm text-zinc-200">Account Privacy</span>
+              <span className="text-sm text-zinc-200">{t.settings.accountPrivacy}</span>
             </div>
             <div
               className={`w-10 h-5 rounded-full p-0.5 transition-colors ${
@@ -157,7 +263,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
             className="flex items-center gap-3 p-3 rounded-xl hover:bg-zinc-800/80 cursor-pointer transition-colors"
           >
             <Shield size={18} className="text-zinc-400" />
-            <span className="text-sm text-zinc-200">🛡️ Privacy Policy & Terms</span>
+            <span className="text-sm text-zinc-200">{t.settings.privacyPolicy}</span>
           </div>
 
           {/* Daily Limits */}
@@ -170,8 +276,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
           >
             <BarChart3 size={18} className="text-zinc-400" />
             <div className="flex-1">
-              <span className="text-sm text-zinc-200">📊 Daily Limits</span>
-              <p className="text-[11px] text-zinc-500">200 Follows / 100 Unfollows</p>
+              <span className="text-sm text-zinc-200">{t.settings.dailyLimits}</span>
+              <p className="text-[11px] text-zinc-500">{t.settings.dailyLimitsSub}</p>
             </div>
           </div>
 
@@ -184,7 +290,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
             className="flex items-center gap-3 p-3 rounded-xl hover:bg-zinc-800/80 cursor-pointer transition-colors"
           >
             <Gem size={18} className="text-[#FFD700]" />
-            <span className="text-sm text-zinc-200">💎 Test Diamonds Rules</span>
+            <span className="text-sm text-zinc-200">{t.settings.diamondsRules}</span>
           </div>
 
           {/* Creator Monetization & Anti-Fraud Shield */}
@@ -198,14 +304,14 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
             <Coins size={18} className="text-[#00FF88]" />
             <div className="flex-1">
               <div className="flex items-center gap-2">
-                <span className="text-sm font-semibold text-zinc-100">💰 Creator Monetization</span>
+                <span className="text-sm font-semibold text-zinc-100">{t.settings.creatorMonetization}</span>
                 <span className="text-[10px] bg-emerald-500/20 text-[#00FF88] px-1.5 py-0.5 rounded font-mono font-bold">₹1 / 1K</span>
               </div>
-              <p className="text-[11px] text-zinc-400">Anti-Bot Shield & Earnings</p>
+              <p className="text-[11px] text-zinc-400">{t.settings.creatorMonetizationSub}</p>
             </div>
           </div>
 
-          {/* Royal Golden Look Switch (Step 3: Golden Look Toggle) */}
+          {/* Royal Golden Look Switch */}
           <div
             onClick={() => {
               playClickSound();
@@ -217,13 +323,15 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
               <Crown size={18} className="text-[#FFD700]" />
               <div>
                 <div className="flex items-center gap-1.5">
-                  <span className="text-sm font-semibold text-white">✨ Royal Golden Look</span>
-                  <span className="text-[9px] bg-amber-500/20 text-[#FFD700] px-1.5 py-0.2 rounded font-bold">VIP</span>
+                  <span className="text-sm font-semibold text-white">{t.settings.royalGoldenLook}</span>
+                  <span className="text-[9px] bg-amber-500/20 text-[#FFD700] px-1.5 py-0.2 rounded font-bold">
+                    {t.settings.vipBadge}
+                  </span>
                 </div>
                 <p className="text-[10px] text-zinc-400">
                   {userProfile?.isPremium || (userProfile?.successfulReferrals || 0) >= 6
-                    ? 'गोल्डन यूआई थीम ऑन/ऑफ स्विच'
-                    : '6 सफल रेफरल पर 31 दिनों के लिए अनलॉक'}
+                    ? t.settings.goldenActiveSub
+                    : t.settings.goldenLockedSub}
                 </p>
               </div>
             </div>
@@ -240,7 +348,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
             </div>
           </div>
 
-          {/* INFINITY Support & Feedback (User Request Part 2) */}
+          {/* INFINITY Support & Feedback */}
           <div
             onClick={() => {
               playClickSound();
@@ -251,10 +359,12 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
             <MessageSquare size={18} className="text-[#00E5FF]" />
             <div className="flex-1">
               <div className="flex items-center gap-2">
-                <span className="text-sm font-bold text-white">💬 Support &amp; Feedback</span>
-                <span className="text-[10px] bg-cyan-500/20 text-[#00E5FF] px-1.5 py-0.5 rounded font-bold">New</span>
+                <span className="text-sm font-bold text-white">{t.settings.supportFeedback}</span>
+                <span className="text-[10px] bg-cyan-500/20 text-[#00E5FF] px-1.5 py-0.5 rounded font-bold">
+                  {t.settings.newBadge}
+                </span>
               </div>
-              <p className="text-[11px] text-zinc-400">बग रिपोर्ट, नया फीचर सुझाव या राय भेजें</p>
+              <p className="text-[11px] text-zinc-400">{t.settings.supportFeedbackSub}</p>
             </div>
           </div>
 
@@ -268,10 +378,31 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
           >
             <Cloud size={18} className="text-[#00E5FF]" />
             <div className="flex-1">
-              <span className="text-sm text-zinc-200">☁️ Cloudinary Media Cloud</span>
-              <p className="text-[11px] text-zinc-500">Reels, Stories & Posts Storage</p>
+              <span className="text-sm text-zinc-200">{t.settings.cloudinaryCloud}</span>
+              <p className="text-[11px] text-zinc-500">{t.settings.cloudinarySub}</p>
             </div>
           </div>
+
+          {/* Blocked Users Management (Hidden for Guest Users) */}
+          {!isGuestUser && (
+            <div
+              onClick={() => {
+                playClickSound();
+                setActiveSubModal('blocked-users');
+              }}
+              className="flex items-center justify-between p-3 rounded-xl hover:bg-zinc-800/80 cursor-pointer transition-colors"
+            >
+              <div className="flex items-center gap-3">
+                <Ban size={18} className="text-rose-400" />
+                <span className="text-sm font-medium text-zinc-200">{t.settings.blockedUsers}</span>
+              </div>
+              {blockedUsers.length > 0 && (
+                <span className="text-[11px] font-bold bg-rose-500/20 text-rose-300 px-2 py-0.5 rounded-full">
+                  {blockedUsers.length}
+                </span>
+              )}
+            </div>
+          )}
 
           {/* Log Out */}
           <div
@@ -282,30 +413,448 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
             className="flex items-center gap-3 p-3 rounded-xl hover:bg-red-500/10 cursor-pointer transition-colors text-red-500"
           >
             <LogOut size={18} />
-            <span className="text-sm font-semibold">🚪 Log Out</span>
+            <span className="text-sm font-semibold">{t.settings.logOut}</span>
           </div>
+
+          {/* Cancel pending deletion directly inside Settings when active */}
+          {!isGuestUser && hasPendingDeletion && onCancelDeletion && (
+            <button
+              type="button"
+              disabled={accountActionLoading}
+              onClick={async () => {
+                playClickSound();
+                setAccountActionLoading(true);
+                try {
+                  await onCancelDeletion();
+                } finally {
+                  setAccountActionLoading(false);
+                }
+              }}
+              className="w-full flex items-center justify-center gap-2.5 p-3.5 rounded-xl bg-green-600 hover:bg-green-500 text-white font-extrabold text-sm transition-colors cursor-pointer disabled:opacity-60"
+            >
+              <ShieldCheck size={18} />
+              <span>{t.settings.stopDeletion}</span>
+            </button>
+          )}
+
+          {/* Bottom Option: Deactivate or Delete Account (Hidden for Guest Users) */}
+          {!isGuestUser && (
+            <div
+              onClick={() => {
+                playClickSound();
+                openAccountClosureModal();
+              }}
+              className="flex items-center justify-between p-3.5 rounded-xl bg-black border border-zinc-700 hover:border-red-500/60 cursor-pointer transition-colors mt-1"
+            >
+              <div className="flex items-center gap-3">
+                <UserX size={18} className="text-red-400 shrink-0" />
+                <span className="text-sm font-bold text-white">{t.settings.closeOrDeleteAccount}</span>
+              </div>
+              {hasPendingDeletion && (
+                <span className="text-[11px] font-bold text-red-400 flex items-center gap-1">
+                  <Clock size={12} />
+                  {t.settings.scheduledBadge}
+                </span>
+              )}
+            </div>
+          )}
         </div>
 
         <button
           onClick={onClose}
           className="w-full mt-4 py-2.5 rounded-xl border border-zinc-800 text-xs text-zinc-400 hover:text-white hover:bg-zinc-800 transition-colors"
         >
-          Cancel
+          {t.settings.cancel}
         </button>
       </div>
 
       {/* Sub Modals */}
-      {activeSubModal && (
+      {activeSubModal && activeSubModal === 'account-closure' && !isGuestUser && (
+        <div className="fixed inset-0 z-60 bg-black/95 backdrop-blur-md flex items-center justify-center p-4">
+          <div className="w-full max-w-sm bg-black border-2 border-zinc-800 rounded-2xl p-5 space-y-4 shadow-2xl text-white">
+            <div className="flex items-center justify-between pb-3 border-b border-zinc-800">
+              <h4 className="text-lg font-extrabold text-white">
+                {accountClosureStep === 'choice' && t.settings.accountClosureModal.stepChoiceTitle}
+                {accountClosureStep === 'deactivate-confirm' && t.settings.accountClosureModal.stepDeactivateTitle}
+                {accountClosureStep === 'delete-duration' && t.settings.accountClosureModal.stepDeleteDurationTitle}
+                {accountClosureStep === 'delete-confirm' && t.settings.accountClosureModal.stepDeleteConfirmTitle}
+              </h4>
+              <button
+                type="button"
+                disabled={accountActionLoading}
+                onClick={() => setActiveSubModal(null)}
+                className="p-1.5 text-white hover:bg-zinc-900 rounded-full"
+                aria-label={t.common.close}
+              >
+                <X size={20} />
+              </button>
+            </div>
+
+            {accountActionError && (
+              <div className="p-3.5 rounded-xl bg-red-950/80 border border-red-500 text-white text-sm font-semibold flex items-start gap-2.5 leading-relaxed">
+                <AlertCircle size={18} className="text-red-400 shrink-0 mt-0.5" />
+                <span>{accountActionError}</span>
+              </div>
+            )}
+
+            {/* STEP 0: Two Main Choices */}
+            {accountClosureStep === 'choice' && (
+              <div className="space-y-3">
+                {hasPendingDeletion && onCancelDeletion && (
+                  <div className="p-4 rounded-xl bg-zinc-950 border border-green-500/60 space-y-3">
+                    <p className="text-base font-bold text-white leading-relaxed">
+                      {t.settings.accountClosureModal.pendingDeletionNotice}
+                    </p>
+                    <button
+                      type="button"
+                      disabled={accountActionLoading}
+                      onClick={async () => {
+                        playClickSound();
+                        setAccountActionLoading(true);
+                        setAccountActionError('');
+                        try {
+                          await onCancelDeletion();
+                          setActiveSubModal(null);
+                        } finally {
+                          setAccountActionLoading(false);
+                        }
+                      }}
+                      className="w-full py-3.5 px-4 rounded-xl bg-green-600 hover:bg-green-500 text-white font-extrabold text-base flex items-center justify-center gap-2 transition-colors disabled:opacity-60"
+                    >
+                      <ShieldCheck size={20} />
+                      <span>{t.settings.accountClosureModal.stopDeletionBtn}</span>
+                    </button>
+                  </div>
+                )}
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    playClickSound();
+                    setAccountActionError('');
+                    setAccountClosureStep('deactivate-confirm');
+                  }}
+                  className="w-full p-4 rounded-xl bg-zinc-950 border-2 border-green-600/80 hover:border-green-500 text-left space-y-2 transition-colors"
+                >
+                  <div className="flex items-center gap-2.5 text-white font-extrabold text-base">
+                    <PauseCircle size={20} className="text-green-400 shrink-0" />
+                    <span>{t.settings.accountClosureModal.deactivateBtn}</span>
+                  </div>
+                  <p className="text-sm text-white/90 leading-relaxed">
+                    {t.settings.accountClosureModal.deactivateCardDesc}
+                  </p>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    playClickSound();
+                    setAccountActionError('');
+                    setAccountClosureStep('delete-duration');
+                  }}
+                  className="w-full p-4 rounded-xl bg-zinc-950 border-2 border-red-600/80 hover:border-red-500 text-left space-y-2 transition-colors"
+                >
+                  <div className="flex items-center gap-2.5 text-white font-extrabold text-base">
+                    <Trash2 size={20} className="text-red-400 shrink-0" />
+                    <span>{t.settings.accountClosureModal.deletePermanentBtn}</span>
+                  </div>
+                  <p className="text-sm text-white/90 leading-relaxed">
+                    {t.settings.accountClosureModal.deleteCardDesc}
+                  </p>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    playClickSound();
+                    setActiveSubModal(null);
+                  }}
+                  className="w-full py-3.5 rounded-xl bg-green-600 hover:bg-green-500 text-white font-extrabold text-base transition-colors"
+                >
+                  {t.settings.accountClosureModal.closeBtn}
+                </button>
+              </div>
+            )}
+
+            {/* STEP A: Temporary Deactivation */}
+            {accountClosureStep === 'deactivate-confirm' && (
+              <div className="space-y-4">
+                <div className="p-4 rounded-xl bg-zinc-950 border border-zinc-700">
+                  <p className="text-base text-white font-semibold leading-relaxed">
+                    {t.settings.accountClosureModal.deactivateFullNotice}
+                  </p>
+                </div>
+
+                <div className="space-y-2.5">
+                  <button
+                    type="button"
+                    disabled={accountActionLoading}
+                    onClick={async () => {
+                      if (!onDeactivateAccount) return;
+                      playClickSound();
+                      setAccountActionLoading(true);
+                      setAccountActionError('');
+                      try {
+                        await onDeactivateAccount();
+                        setActiveSubModal(null);
+                      } catch (err: any) {
+                        setAccountActionError(
+                          err?.message || t.settings.accountClosureModal.deactivateFailedError
+                        );
+                      } finally {
+                        setAccountActionLoading(false);
+                      }
+                    }}
+                    className="w-full py-3.5 px-4 rounded-xl bg-green-600 hover:bg-green-500 text-white font-extrabold text-base flex items-center justify-center gap-2 transition-colors disabled:opacity-60"
+                  >
+                    {accountActionLoading ? (
+                      <>
+                        <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                        <span>{t.settings.accountClosureModal.deactivatingBtn}</span>
+                      </>
+                    ) : (
+                      <span>{t.settings.accountClosureModal.deactivateBtn}</span>
+                    )}
+                  </button>
+
+                  <button
+                    type="button"
+                    disabled={accountActionLoading}
+                    onClick={() => {
+                      playClickSound();
+                      setAccountActionError('');
+                      setAccountClosureStep('choice');
+                    }}
+                    className="w-full py-3.5 px-4 rounded-xl bg-green-700 hover:bg-green-600 text-white font-bold text-base transition-colors disabled:opacity-60"
+                  >
+                    {t.settings.accountClosureModal.goBackBtn}
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {/* STEP B1: Choose 7 Days or 30 Days */}
+            {accountClosureStep === 'delete-duration' && (
+              <div className="space-y-4">
+                <p className="text-base text-white font-semibold leading-relaxed">
+                  {t.settings.accountClosureModal.chooseDaysPrompt}
+                </p>
+
+                <div className="space-y-3">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      playClickSound();
+                      setSelectedDeleteDays(7);
+                      setAccountActionError('');
+                      setAccountClosureStep('delete-confirm');
+                    }}
+                    className="w-full py-4 px-4 rounded-xl bg-red-600 hover:bg-red-500 text-white font-extrabold text-base flex items-center justify-center gap-2 transition-colors"
+                  >
+                    <Trash2 size={18} />
+                    <span>{t.settings.accountClosureModal.deleteIn7Days}</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => {
+                      playClickSound();
+                      setSelectedDeleteDays(30);
+                      setAccountActionError('');
+                      setAccountClosureStep('delete-confirm');
+                    }}
+                    className="w-full py-4 px-4 rounded-xl bg-red-600 hover:bg-red-500 text-white font-extrabold text-base flex items-center justify-center gap-2 transition-colors"
+                  >
+                    <Trash2 size={18} />
+                    <span>{t.settings.accountClosureModal.deleteIn30Days}</span>
+                  </button>
+                </div>
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    playClickSound();
+                    setAccountActionError('');
+                    setAccountClosureStep('choice');
+                  }}
+                  className="w-full py-3.5 px-4 rounded-xl bg-green-600 hover:bg-green-500 text-white font-extrabold text-base transition-colors"
+                >
+                  {t.settings.accountClosureModal.goBackBtn}
+                </button>
+              </div>
+            )}
+
+            {/* STEP B2: Exact Target Date Confirmation + Google Re-Authentication */}
+            {accountClosureStep === 'delete-confirm' && (
+              <div className="space-y-4">
+                <div className="p-4 rounded-xl bg-zinc-950 border-2 border-red-600/80 space-y-3">
+                  <p className="text-base font-bold text-white leading-relaxed">
+                    {t.settings.accountClosureModal.deleteTargetConfirmText(formattedDeleteTargetDate)}
+                  </p>
+                  <p className="text-sm text-white/85 leading-relaxed border-t border-zinc-800 pt-2.5">
+                    {t.settings.accountClosureModal.googleReauthNote}
+                  </p>
+                </div>
+
+                <div className="space-y-2.5">
+                  <button
+                    type="button"
+                    disabled={accountActionLoading}
+                    onClick={async () => {
+                      if (!onScheduleDeletion) return;
+                      playClickSound();
+                      setAccountActionLoading(true);
+                      setAccountActionError('');
+                      try {
+                        const result = await onScheduleDeletion(selectedDeleteDays);
+                        if (!result.success) {
+                          setAccountActionError(
+                            result.error || t.settings.accountClosureModal.googleAuthError
+                          );
+                          return;
+                        }
+                        setActiveSubModal(null);
+                      } catch (err: any) {
+                        setAccountActionError(
+                          err?.message || t.settings.accountClosureModal.scheduleFailedError
+                        );
+                      } finally {
+                        setAccountActionLoading(false);
+                      }
+                    }}
+                    className="w-full py-3.5 px-4 rounded-xl bg-red-600 hover:bg-red-500 text-white font-extrabold text-base flex items-center justify-center gap-2 transition-colors disabled:opacity-60"
+                  >
+                    {accountActionLoading ? (
+                      <>
+                        <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                        <span>{t.settings.accountClosureModal.verifyingGoogleBtn}</span>
+                      </>
+                    ) : (
+                      <span>{t.settings.accountClosureModal.confirmScheduleBtn}</span>
+                    )}
+                  </button>
+
+                  <button
+                    type="button"
+                    disabled={accountActionLoading}
+                    onClick={() => {
+                      playClickSound();
+                      setAccountActionError('');
+                      setActiveSubModal(null);
+                    }}
+                    className="w-full py-3.5 px-4 rounded-xl bg-green-600 hover:bg-green-500 text-white font-extrabold text-base transition-colors disabled:opacity-60"
+                  >
+                    {t.settings.accountClosureModal.cancelBtn}
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {activeSubModal && activeSubModal === 'blocked-users' && !isGuestUser && (
+        <div className="fixed inset-0 z-60 bg-black/90 backdrop-blur-md flex items-center justify-center p-4">
+          <div className="w-full max-w-sm bg-[#16181C] border border-zinc-800 rounded-2xl p-5 space-y-4 shadow-2xl text-white max-h-[80vh] flex flex-col">
+            <div className="flex items-center justify-between pb-3 border-b border-zinc-800 shrink-0">
+              <div className="flex items-center gap-2">
+                <Ban size={18} className="text-rose-400" />
+                <h4 className="text-base font-extrabold text-white">{t.settings.blockedModal.title}</h4>
+              </div>
+              <button
+                type="button"
+                onClick={() => setActiveSubModal(null)}
+                className="p-1 text-zinc-400 hover:text-white rounded-full"
+                aria-label={t.common.close}
+              >
+                <X size={18} />
+              </button>
+            </div>
+
+            <div className="flex-1 overflow-y-auto space-y-2.5 pr-1 no-scrollbar min-h-[140px]">
+              {blockedUsers.length === 0 ? (
+                <div className="py-10 flex flex-col items-center justify-center text-center px-4">
+                  <div className="w-12 h-12 rounded-full bg-zinc-900 border border-zinc-800 flex items-center justify-center mb-3 text-zinc-500">
+                    <Ban size={20} />
+                  </div>
+                  <p className="text-xs font-semibold text-zinc-400">
+                    {t.settings.blockedModal.emptyState}
+                  </p>
+                </div>
+              ) : (
+                blockedUsers.map((entry) => {
+                  const isBusy = unblockingUsername === entry.blockedUsername;
+                  return (
+                    <div
+                      key={entry.blockId || entry.blockedUsername}
+                      className="p-2.5 rounded-xl bg-zinc-900/90 border border-zinc-800 flex items-center justify-between gap-2.5"
+                    >
+                      <div className="flex items-center gap-2.5 min-w-0">
+                        <img
+                          src={
+                            entry.blockedAvatar ||
+                            `https://api.dicebear.com/7.x/avataaars/svg?seed=${encodeURIComponent(
+                              entry.blockedUsername
+                            )}`
+                          }
+                          alt={entry.blockedUsername}
+                          className="w-9 h-9 rounded-full object-cover border border-zinc-700 shrink-0 bg-zinc-950"
+                        />
+                        <div className="min-w-0">
+                          <p className="text-xs font-bold text-white truncate">
+                            {entry.blockedName || entry.blockedUsername}
+                          </p>
+                          <p className="text-[11px] text-zinc-400 truncate">
+                            @{entry.blockedUsername}
+                          </p>
+                        </div>
+                      </div>
+
+                      <button
+                        type="button"
+                        disabled={isBusy}
+                        onClick={async () => {
+                          if (!onUnblockUser) return;
+                          playClickSound();
+                          setUnblockingUsername(entry.blockedUsername);
+                          try {
+                            await onUnblockUser(entry.blockedUsername);
+                          } finally {
+                            setUnblockingUsername(null);
+                          }
+                        }}
+                        className="px-3 py-1.5 rounded-lg bg-[#00FF88] hover:bg-[#00e57a] text-black font-bold text-xs shrink-0 transition-all active:scale-95 disabled:opacity-50"
+                      >
+                        {isBusy ? '...' : t.settings.blockedModal.unblockBtn}
+                      </button>
+                    </div>
+                  );
+                })
+              )}
+            </div>
+
+            <button
+              type="button"
+              onClick={() => setActiveSubModal(null)}
+              className="w-full py-2.5 rounded-xl border border-zinc-800 text-xs font-semibold text-zinc-300 hover:text-white hover:bg-zinc-800 transition-colors shrink-0"
+            >
+              {t.settings.blockedModal.closeBtn}
+            </button>
+          </div>
+        </div>
+      )}
+
+      {activeSubModal && activeSubModal !== 'account-closure' && activeSubModal !== 'blocked-users' && (
         <div className="fixed inset-0 z-60 bg-black/85 backdrop-blur-md flex items-center justify-center p-4">
           <div className="w-full max-w-sm bg-[#1A1A1A] border border-zinc-800 rounded-2xl p-5 space-y-3 shadow-2xl">
             <div className="flex items-center justify-between pb-2 border-b border-zinc-800">
               <h4 className="text-sm font-bold text-white">
-                {activeSubModal === 'privacy-policy' && '🛡️ Play Store Privacy Policy & Terms'}
-                {activeSubModal === 'daily-limits' && '📊 Daily Safety Limits'}
-                {activeSubModal === 'diamonds-rules' && '💎 Test Diamonds Rules'}
-                {activeSubModal === 'cloudinary-settings' && '☁️ Cloudinary Media Cloud'}
-                {activeSubModal === 'creator-monetization' && '💰 Creator Monetization & Anti-Bot'}
-                {activeSubModal === 'support-feedback' && '💬 Send Feedback & Report'}
+                {activeSubModal === 'privacy-policy' && t.settings.subModalTitles.privacyPolicy}
+                {activeSubModal === 'daily-limits' && t.settings.subModalTitles.dailyLimits}
+                {activeSubModal === 'diamonds-rules' && t.settings.subModalTitles.diamondsRules}
+                {activeSubModal === 'cloudinary-settings' && t.settings.subModalTitles.cloudinarySettings}
+                {activeSubModal === 'creator-monetization' && t.settings.subModalTitles.creatorMonetization}
+                {activeSubModal === 'support-feedback' && t.settings.subModalTitles.supportFeedback}
               </h4>
               <button
                 onClick={() => setActiveSubModal(null)}
@@ -318,42 +867,36 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
             {activeSubModal === 'privacy-policy' && (
               <div className="text-xs text-zinc-300 space-y-3 leading-relaxed max-h-[60vh] overflow-y-auto pr-1 no-scrollbar">
                 <div className="p-2.5 bg-zinc-900 rounded-xl border border-zinc-800 space-y-1">
-                  <p className="font-bold text-white text-xs">Infinity Social Platform - Privacy Policy</p>
-                  <p className="text-[10px] text-zinc-400">Effective Date: November 2026 · Play Store Compliant</p>
+                  <p className="font-bold text-white text-xs">{t.settings.privacyModal.heading}</p>
+                  <p className="text-[10px] text-zinc-400">{t.settings.privacyModal.effective}</p>
                 </div>
 
                 <div className="space-y-1">
-                  <p className="font-bold text-white">1. Information We Collect</p>
-                  <p className="text-zinc-400 text-[11px]">
-                    We collect user account identifiers (such as mobile number, verified Google account or email), optional profile details (display name, avatar, bio), and short videos/reels uploaded by the user.
-                  </p>
+                  <p className="font-bold text-white">{t.settings.privacyModal.s1Title}</p>
+                  <p className="text-zinc-400 text-[11px]">{t.settings.privacyModal.s1Body}</p>
                 </div>
 
                 <div className="space-y-1">
-                  <p className="font-bold text-white">2. Device Permissions (Camera &amp; Audio)</p>
-                  <p className="text-zinc-400 text-[11px]">
-                    Camera and Microphone access are requested solely when recording reels, stories, or updating profile pictures. Media is uploaded securely to Cloudinary and Firebase servers and is never accessed without user intent.
-                  </p>
+                  <p className="font-bold text-white">{t.settings.privacyModal.s2Title}</p>
+                  <p className="text-zinc-400 text-[11px]">{t.settings.privacyModal.s2Body}</p>
                 </div>
 
                 <div className="space-y-1">
-                  <p className="font-bold text-white">3. Zero Selling of Personal Data</p>
-                  <p className="text-zinc-400 text-[11px]">
-                    Infinity does NOT sell, rent, or trade your personal information to third-party data brokers. Authentication is protected via Google Firebase Auth with secure token encryption.
-                  </p>
+                  <p className="font-bold text-white">{t.settings.privacyModal.s3Title}</p>
+                  <p className="text-zinc-400 text-[11px]">{t.settings.privacyModal.s3Body}</p>
                 </div>
 
                 <div className="space-y-1">
-                  <p className="font-bold text-white">4. Community Moderation &amp; 7-Report Rule</p>
-                  <p className="text-zinc-400 text-[11px]">
-                    To maintain family-safe content, any video that receives 7 or more community reports is automatically hidden from public discovery pending admin review.
-                  </p>
+                  <p className="font-bold text-white">{t.settings.privacyModal.s4Title}</p>
+                  <p className="text-zinc-400 text-[11px]">{t.settings.privacyModal.s4Body}</p>
                 </div>
 
                 <div className="space-y-1">
-                  <p className="font-bold text-white">5. Developer &amp; Grievance Contact</p>
+                  <p className="font-bold text-white">{t.settings.privacyModal.s5Title}</p>
                   <p className="text-zinc-400 text-[11px]">
-                    For privacy requests or account deletion, contact: <span className="text-[#00FF88] font-mono">support@infinity.app</span> or send a message via the in-app "Support &amp; Feedback" tool.
+                    {t.settings.privacyModal.s5BodyBefore}
+                    <span className="text-[#00FF88] font-mono">support@infinity.app</span>
+                    {t.settings.privacyModal.s5BodyAfter}
                   </p>
                 </div>
               </div>
@@ -361,31 +904,29 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
 
             {activeSubModal === 'daily-limits' && (
               <div className="text-xs text-zinc-300 space-y-2">
-                <p>To prevent automation and foster genuine creator communities:</p>
+                <p>{t.settings.limitsModal.intro}</p>
                 <div className="p-3 bg-zinc-900 rounded-lg space-y-1">
                   <div className="flex justify-between">
-                    <span>Follows today:</span>
+                    <span>{t.settings.limitsModal.followsToday}</span>
                     <strong className="text-[#00FF88]">{dailyFollows} / 200</strong>
                   </div>
                   <div className="flex justify-between">
-                    <span>Unfollows today:</span>
+                    <span>{t.settings.limitsModal.unfollowsToday}</span>
                     <strong className="text-zinc-400">0 / 100</strong>
                   </div>
                 </div>
-                <p className="text-[11px] text-zinc-500">Limits reset every 24 hours.</p>
+                <p className="text-[11px] text-zinc-500">{t.settings.limitsModal.resetNote}</p>
               </div>
             )}
 
             {activeSubModal === 'diamonds-rules' && (
               <div className="text-xs text-zinc-300 space-y-2">
                 <p className="font-semibold text-[#FFD700]">
-                  100 Test Diamonds = ₹1 (Internal testing rule only)
+                  {t.settings.diamondsModal.rule}
                 </p>
-                <p>
-                  Test Diamonds are virtual tokens used to evaluate creator engagement, wheel mechanics, and tip calculations.
-                </p>
+                <p>{t.settings.diamondsModal.desc}</p>
                 <p className="text-[11px] text-zinc-400 italic">
-                  TEST DIAMONDS — No Monetary Value. They cannot be withdrawn for actual currency during beta testing.
+                  {t.settings.diamondsModal.note}
                 </p>
               </div>
             )}
@@ -394,40 +935,38 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
               <div className="text-xs text-zinc-300 space-y-3 max-h-[70vh] overflow-y-auto pr-1">
                 <div className="p-3 bg-zinc-900 rounded-xl space-y-2 border border-zinc-800">
                   <div className="flex items-center justify-between">
-                    <span className="font-semibold text-white">Integrated Features:</span>
+                    <span className="font-semibold text-white">{t.settings.cloudinaryModal.featuresLabel}</span>
                     <span className="text-[10px] bg-emerald-500/20 text-[#00FF88] px-2 py-0.5 rounded font-mono">
-                      Reels · Stories · Posts
+                      {t.settings.cloudinaryModal.featuresPill}
                     </span>
                   </div>
                   <p className="text-[11px] text-zinc-400">
-                    Captions, likes, comments, and profile data stay securely in Firebase. Photos &amp; videos upload with automatic q_auto &amp; f_auto compression.
+                    {t.settings.cloudinaryModal.desc}
                   </p>
                 </div>
 
                 <div className="p-3 bg-zinc-900/80 rounded-xl space-y-2 border border-zinc-800/80">
-                  <span className="font-semibold text-white block">Cloudinary Connection:</span>
+                  <span className="font-semibold text-white block">{t.settings.cloudinaryModal.connectionLabel}</span>
                   <div className="flex justify-between items-center text-[11px]">
-                    <span className="text-zinc-400">Cloud Name:</span>
+                    <span className="text-zinc-400">{t.settings.cloudinaryModal.cloudNameLabel}</span>
                     <span className="font-mono text-white">
-                      {getCloudinaryConfig().cloudName || 'Configured via .env or server'}
+                      {getCloudinaryConfig().cloudName || t.settings.cloudinaryModal.cloudNameFallback}
                     </span>
                   </div>
                   <div className="flex justify-between items-center text-[11px]">
-                    <span className="text-zinc-400">Upload Preset:</span>
+                    <span className="text-zinc-400">{t.settings.cloudinaryModal.presetLabel}</span>
                     <span className="font-mono text-white">
-                      {getCloudinaryConfig().uploadPreset || 'Unsigned Preset'}
+                      {getCloudinaryConfig().uploadPreset || t.settings.cloudinaryModal.presetFallback}
                     </span>
                   </div>
                 </div>
 
                 <div className="p-3 bg-blue-500/10 border border-blue-500/20 rounded-xl space-y-1.5 text-[11px] text-blue-200">
-                  <p className="font-semibold text-blue-300">⚙️ How to configure Cloudinary:</p>
+                  <p className="font-semibold text-blue-300">{t.settings.cloudinaryModal.howToTitle}</p>
                   <ol className="list-decimal list-inside space-y-1 text-zinc-300 text-[10px]">
-                    <li>Sign up / log in to <strong>Cloudinary Console</strong>.</li>
-                    <li>Copy your <strong>Cloud Name</strong> from the Dashboard.</li>
-                    <li>Go to <strong>Settings ⚙️ &rarr; Upload &rarr; Upload Presets</strong>.</li>
-                    <li>Click <strong>Add Upload Preset</strong>, select <strong>Signing Mode: Unsigned</strong>.</li>
-                    <li>Save the preset name (e.g. <code className="text-[#00FF88]">infinity_media</code>).</li>
+                    {t.settings.cloudinaryModal.steps.map((step, i) => (
+                      <li key={i}>{step}</li>
+                    ))}
                   </ol>
                 </div>
 
@@ -457,7 +996,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                         setTestStatus('success');
                       } catch (err: any) {
                         setTestStatus('error');
-                        setErrorMessage(err.message || 'Upload test failed');
+                        setErrorMessage(err.message || t.settings.cloudinaryModal.uploadFailed);
                       }
                     }}
                     disabled={testStatus === 'testing'}
@@ -466,12 +1005,12 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                     {testStatus === 'testing' ? (
                       <>
                         <div className="w-3.5 h-3.5 border-2 border-black border-t-transparent rounded-full animate-spin" />
-                        <span>Running Test Upload...</span>
+                        <span>{t.settings.cloudinaryModal.testingBtn}</span>
                       </>
                     ) : (
                       <>
                         <Cloud size={14} />
-                        <span>Test Upload Media Pipeline</span>
+                        <span>{t.settings.cloudinaryModal.testBtn}</span>
                       </>
                     )}
                   </button>
@@ -480,7 +1019,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                     <div className="mt-2 p-2.5 bg-emerald-500/10 border border-emerald-500/30 rounded-xl space-y-1 text-[11px] text-emerald-300">
                       <div className="flex items-center gap-1.5 font-bold">
                         <CheckCircle2 size={13} className="text-[#00FF88]" />
-                        <span>Upload Pipeline Verified!</span>
+                        <span>{t.settings.cloudinaryModal.verifiedMsg}</span>
                       </div>
                       <p className="text-[10px] text-zinc-400 break-all">
                         Public ID: {testResult.publicId}
@@ -503,41 +1042,39 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
 
             {activeSubModal === 'creator-monetization' && (
               <div className="space-y-3">
-                {/* Official Policy Banner - Exact Hindi Instruction */}
                 <div className="p-3 bg-gradient-to-br from-emerald-950/60 to-zinc-900 border border-emerald-500/50 rounded-xl space-y-2">
                   <div className="flex items-center gap-1.5">
                     <Coins size={16} className="text-[#00FF88]" />
                     <span className="text-xs font-bold text-[#00FF88]">
-                      रील्स मोनेटाइजेशन पॉलिसी
+                      {t.settings.monetizationModal.policyTitle}
                     </span>
                   </div>
-                  {/* MANDATORY EXACT TEXT */}
                   <p className="text-xs text-white font-medium leading-relaxed bg-black/40 p-2.5 rounded-lg border border-emerald-500/30">
-                    "₹1 प्रति 1000 रील्स व्यूज (Coming Soon)। केवल ओरिजिनल और असली व्यूज मान्य हैं। बोट या फेक व्यूज पाए जाने पर पेआउट रद्द कर दिया जाएगा।"
+                    {t.settings.monetizationModal.policyText}
                   </p>
                 </div>
 
                 {/* Earnings & View Count Breakdown */}
                 <div className="grid grid-cols-2 gap-2 text-xs">
                   <div className="p-2.5 bg-zinc-900/90 rounded-xl border border-zinc-800">
-                    <p className="text-[10px] text-zinc-400">Total All-Time Views</p>
+                    <p className="text-[10px] text-zinc-400">{t.settings.monetizationModal.totalViews}</p>
                     <p className="text-sm font-black text-white mt-0.5">1,200,000</p>
-                    <span className="text-[9px] text-zinc-500">1.2M raw views</span>
+                    <span className="text-[9px] text-zinc-500">{t.settings.monetizationModal.rawViews}</span>
                   </div>
                   <div className="p-2.5 bg-zinc-900/90 rounded-xl border border-emerald-500/30">
-                    <p className="text-[10px] text-[#00FF88]">Verified Views (3s+)</p>
+                    <p className="text-[10px] text-[#00FF88]">{t.settings.monetizationModal.verifiedViews}</p>
                     <p className="text-sm font-black text-[#00FF88] mt-0.5">1,080,000</p>
-                    <span className="text-[9px] text-emerald-400/80">90% Authentic</span>
+                    <span className="text-[9px] text-emerald-400/80">{t.settings.monetizationModal.authenticRate}</span>
                   </div>
                   <div className="p-2.5 bg-zinc-900/90 rounded-xl border border-rose-500/30">
-                    <p className="text-[10px] text-rose-400">Bot / Fast-Scroll Filtered</p>
+                    <p className="text-[10px] text-rose-400">{t.settings.monetizationModal.filteredViews}</p>
                     <p className="text-sm font-black text-rose-400 mt-0.5">120,000</p>
-                    <span className="text-[9px] text-zinc-500">0 payout credited</span>
+                    <span className="text-[9px] text-zinc-500">{t.settings.monetizationModal.zeroPayout}</span>
                   </div>
                   <div className="p-2.5 bg-zinc-900/90 rounded-xl border border-[#FFD700]/30">
-                    <p className="text-[10px] text-[#FFD700]">Est. Creator Payout</p>
+                    <p className="text-[10px] text-[#FFD700]">{t.settings.monetizationModal.estPayout}</p>
                     <p className="text-sm font-black text-[#FFD700] mt-0.5">₹1,080</p>
-                    <span className="text-[9px] text-[#FFD700]/80">Rate: ₹1 / 1,000 Views</span>
+                    <span className="text-[9px] text-[#FFD700]/80">{t.settings.monetizationModal.rateText}</span>
                   </div>
                 </div>
 
@@ -545,32 +1082,44 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                 <div className="p-3 bg-zinc-900/70 border border-zinc-800 rounded-xl space-y-2 text-[11px] text-zinc-300">
                   <p className="text-xs font-bold text-white flex items-center gap-1.5">
                     <Shield size={14} className="text-[#00E5FF]" />
-                    <span>Anti-Bot Shield Protection</span>
+                    <span>{t.settings.monetizationModal.shieldTitle}</span>
                   </p>
                   <div className="space-y-1.5">
                     <div className="flex items-start gap-2">
                       <CheckCircle2 size={13} className="text-[#00FF88] shrink-0 mt-0.5" />
-                      <span><strong>3-Second Watch Rule:</strong> 3 सेकंड से कम देखने या तेज़ स्क्रॉल करने पर व्यू काउंट नहीं होगा।</span>
+                      <span>
+                        <strong>{t.settings.monetizationModal.rule1Title}</strong>{' '}
+                        {t.settings.monetizationModal.rule1Desc}
+                      </span>
                     </div>
                     <div className="flex items-start gap-2">
                       <CheckCircle2 size={13} className="text-[#00FF88] shrink-0 mt-0.5" />
-                      <span><strong>24-Hour Device Dedup:</strong> एक ही डिवाइस से 24 घंटे में बार-बार लूप में देखना फिल्टर किया जाएगा।</span>
+                      <span>
+                        <strong>{t.settings.monetizationModal.rule2Title}</strong>{' '}
+                        {t.settings.monetizationModal.rule2Desc}
+                      </span>
                     </div>
                     <div className="flex items-start gap-2">
                       <CheckCircle2 size={13} className="text-[#00FF88] shrink-0 mt-0.5" />
-                      <span><strong>Verified Creator Auth:</strong> पेआउट पाने के लिए ईमेल/पासवर्ड से लॉग इन होना अनिवार्य है।</span>
+                      <span>
+                        <strong>{t.settings.monetizationModal.rule3Title}</strong>{' '}
+                        {t.settings.monetizationModal.rule3Desc}
+                      </span>
                     </div>
                     <div className="flex items-start gap-2">
                       <CheckCircle2 size={13} className="text-[#00FF88] shrink-0 mt-0.5" />
-                      <span><strong>AI Bot Neutralizer:</strong> ऑटोमेटेड बॉट ट्रैफिक तुरंत ब्लॉक कर दिया जाएगा।</span>
+                      <span>
+                        <strong>{t.settings.monetizationModal.rule4Title}</strong>{' '}
+                        {t.settings.monetizationModal.rule4Desc}
+                      </span>
                     </div>
                   </div>
                 </div>
 
-                {/* Status Notice */}
                 <div className="text-center py-1">
                   <span className="text-[10px] text-zinc-400">
-                    Status: <span className="text-[#00FF88] font-bold">Anti-Bot Shield Active (Beta)</span>
+                    {t.settings.monetizationModal.statusLabel}{' '}
+                    <span className="text-[#00FF88] font-bold">{t.settings.monetizationModal.statusValue}</span>
                   </span>
                 </div>
               </div>
@@ -581,9 +1130,9 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                 {feedbackSent ? (
                   <div className="p-4 bg-emerald-500/15 border border-emerald-500/40 rounded-2xl text-center space-y-2 animate-fadeIn">
                     <CheckCircle2 size={32} className="text-[#00FF88] mx-auto" />
-                    <p className="text-sm font-bold text-white">धन्यवाद! आपका संदेश डेवलपर को भेज दिया गया है।</p>
+                    <p className="text-sm font-bold text-white">{t.settings.feedbackModal.thankYouTitle}</p>
                     <p className="text-xs text-zinc-300">
-                      Infinity सपोर्ट टीम आपके सुझाव और रिपोर्ट को प्राथमिकता के साथ देखेगी।
+                      {t.settings.feedbackModal.thankYouDesc}
                     </p>
                   </div>
                 ) : (
@@ -592,7 +1141,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                       e.preventDefault();
                       if (!feedbackText.trim()) return;
                       if (wordCount > 300) {
-                        alert('कृपया 300 शब्दों के भीतर लिखें। (Maximum 300 words limit).');
+                        setErrorMessage(t.settings.feedbackModal.wordLimitAlert);
                         return;
                       }
 
@@ -630,7 +1179,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                     {/* Category Selection Tabs */}
                     <div>
                       <label className="text-[11px] font-semibold text-zinc-300 block mb-1.5">
-                        श्रेणी चुनें (Select Category):
+                        {t.settings.feedbackModal.selectCategory}
                       </label>
                       <div className="grid grid-cols-3 gap-1.5">
                         <button
@@ -646,7 +1195,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                           }`}
                         >
                           <Bug size={14} className={feedbackCategory === 'bug' ? 'text-red-400' : 'text-zinc-500'} />
-                          <span className="truncate">🐛 Bug Report</span>
+                          <span className="truncate">{t.settings.feedbackModal.bugReport}</span>
                         </button>
 
                         <button
@@ -662,7 +1211,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                           }`}
                         >
                           <Lightbulb size={14} className={feedbackCategory === 'feature' ? 'text-[#00E5FF]' : 'text-zinc-500'} />
-                          <span className="truncate">✨ Feature Idea</span>
+                          <span className="truncate">{t.settings.feedbackModal.featureIdea}</span>
                         </button>
 
                         <button
@@ -678,30 +1227,30 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                           }`}
                         >
                           <Sparkles size={14} className={feedbackCategory === 'general' ? 'text-[#00FF88]' : 'text-zinc-500'} />
-                          <span className="truncate">💡 Feedback</span>
+                          <span className="truncate">{t.settings.feedbackModal.feedback}</span>
                         </button>
                       </div>
                     </div>
 
-                    {/* Word Limit Textarea (Max 300 words) */}
+                    {/* Word Limit Textarea */}
                     <div>
                       <div className="flex items-center justify-between mb-1">
                         <label className="text-[11px] font-semibold text-zinc-300">
-                          आपका संदेश (Your Message)
+                          {t.settings.feedbackModal.yourMessage}
                         </label>
                         <span
                           className={`text-[10px] font-mono font-bold ${
                             wordCount > 300 ? 'text-red-400' : 'text-[#00FF88]'
                           }`}
                         >
-                          {wordCount} / 300 words
+                          {wordCount} / 300 {t.settings.feedbackModal.wordsSuffix}
                         </span>
                       </div>
                       <textarea
                         rows={4}
                         value={feedbackText}
                         onChange={(e) => setFeedbackText(e.target.value)}
-                        placeholder="ऐप की कोई समस्या, सुझाव या राय खुलकर लिखें (अधिकतम 300 शब्द)..."
+                        placeholder={t.settings.feedbackModal.messagePlaceholder}
                         required
                         className="w-full p-2.5 bg-zinc-900 border border-zinc-800 rounded-xl text-xs text-white placeholder-zinc-500 focus:outline-none focus:border-[#00E5FF] resize-none"
                       />
@@ -710,18 +1259,17 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                     {/* Contact details */}
                     <div>
                       <label className="text-[11px] font-semibold text-zinc-300 block mb-1">
-                        ईमेल या मोबाइल नंबर (वैकल्पिक / Optional Contact)
+                        {t.settings.feedbackModal.contactLabel}
                       </label>
                       <input
                         type="text"
                         value={feedbackContact}
                         onChange={(e) => setFeedbackContact(e.target.value)}
-                        placeholder="जैसे: yourname@gmail.com या +91..."
+                        placeholder={t.settings.feedbackModal.contactPlaceholder}
                         className="w-full px-3 py-2 bg-zinc-900 border border-zinc-800 rounded-xl text-xs text-white placeholder-zinc-500 focus:outline-none focus:border-[#00E5FF]"
                       />
                     </div>
 
-                    {/* Glowing Premium Blue/Emerald Button "Send to Developer" */}
                     <button
                       type="submit"
                       disabled={feedbackSending || !feedbackText.trim() || wordCount > 300}
@@ -730,12 +1278,12 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                       {feedbackSending ? (
                         <>
                           <div className="w-3.5 h-3.5 border-2 border-black border-t-transparent rounded-full animate-spin" />
-                          <span>भेजा जा रहा है...</span>
+                          <span>{t.settings.feedbackModal.sendingBtn}</span>
                         </>
                       ) : (
                         <>
                           <Send size={14} className="text-black" />
-                          <span>डेवलपर को भेजें (Send to Developer)</span>
+                          <span>{t.settings.feedbackModal.sendBtn}</span>
                         </>
                       )}
                     </button>
@@ -748,7 +1296,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
               onClick={() => setActiveSubModal(null)}
               className="w-full py-2 bg-[#00FF88] text-black text-xs font-bold rounded-lg mt-3"
             >
-              Understood
+              {t.common.understood}
             </button>
           </div>
         </div>

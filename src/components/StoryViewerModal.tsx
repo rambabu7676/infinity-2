@@ -8,7 +8,9 @@ interface StoryViewerModalProps {
   initialStoryIndex: number;
   isOpen: boolean;
   onClose: () => void;
-  onDeleteMySlide?: (slideId: string) => void;
+  currentUserUid?: string;
+  onMarkStorySeen?: (story: StoryItem) => void;
+  onDeleteMySlide?: (storyId: string, slideId: string) => void;
 }
 
 export const StoryViewerModal: React.FC<StoryViewerModalProps> = ({
@@ -16,6 +18,8 @@ export const StoryViewerModal: React.FC<StoryViewerModalProps> = ({
   initialStoryIndex,
   isOpen,
   onClose,
+  currentUserUid,
+  onMarkStorySeen,
   onDeleteMySlide,
 }) => {
   const [currentStoryIdx, setCurrentStoryIdx] = useState(initialStoryIndex);
@@ -40,6 +44,25 @@ export const StoryViewerModal: React.FC<StoryViewerModalProps> = ({
 
   const activeStory = stories[currentStoryIdx];
   const activeSlide = activeStory?.slides[currentSlideIdx];
+
+  // Clamp slide index if slides list shrinks (e.g., after deleting a slide)
+  useEffect(() => {
+    if (!isOpen || !activeStory) return;
+    if (activeStory.slides.length === 0) {
+      onClose();
+      return;
+    }
+    if (currentSlideIdx >= activeStory.slides.length) {
+      setCurrentSlideIdx(Math.max(0, activeStory.slides.length - 1));
+    }
+  }, [isOpen, activeStory?.slides.length, currentSlideIdx]);
+
+  // Mark active story as seen when viewed
+  useEffect(() => {
+    if (isOpen && activeStory && activeStory.slides.length > 0 && onMarkStorySeen) {
+      onMarkStorySeen(activeStory);
+    }
+  }, [isOpen, activeStory?.id, activeStory?.slides.length]);
 
   // Story Progress Timer
   useEffect(() => {
@@ -214,16 +237,16 @@ export const StoryViewerModal: React.FC<StoryViewerModalProps> = ({
           <div className="flex items-center gap-2.5">
             {/* Creator Avatar with Story Ring */}
             <div className="w-9 h-9 rounded-full p-0.5 bg-gradient-to-tr from-[#00FF88] to-cyan-400">
-              {activeStory.isMyStory || !activeStory.userAvatar ? (
-                <div className="w-full h-full rounded-full bg-black flex items-center justify-center text-[#00FF88] text-xs font-bold">
-                  ∞
-                </div>
-              ) : (
+              {activeStory.userAvatar ? (
                 <img
                   src={activeStory.userAvatar}
                   alt={activeStory.username}
                   className="w-full h-full rounded-full object-cover"
                 />
+              ) : (
+                <div className="w-full h-full rounded-full bg-black flex items-center justify-center text-[#00FF88] text-xs font-bold">
+                  ∞
+                </div>
               )}
             </div>
 
@@ -247,12 +270,27 @@ export const StoryViewerModal: React.FC<StoryViewerModalProps> = ({
           </div>
 
           <div className="flex items-center gap-2">
-            {activeStory.isMyStory && onDeleteMySlide && (
+            {Boolean(
+              currentUserUid &&
+              currentUserUid !== 'guest_user' &&
+              activeStory.userId === currentUserUid &&
+              activeStory.isMyStory &&
+              onDeleteMySlide
+            ) && (
               <button
                 onClick={(e) => {
                   e.stopPropagation();
-                  onDeleteMySlide(activeSlide.id);
-                  handleNextSlide();
+                  const isLastSlide = activeStory.slides.length <= 1;
+                  onDeleteMySlide!(activeStory.id, activeSlide.id);
+                  if (isLastSlide) {
+                    onClose();
+                  } else {
+                    setProgress(0);
+                    elapsedBeforePauseRef.current = 0;
+                    if (currentSlideIdx >= activeStory.slides.length - 1) {
+                      setCurrentSlideIdx(Math.max(0, activeStory.slides.length - 2));
+                    }
+                  }
                 }}
                 className="w-8 h-8 rounded-full bg-black/40 text-red-400 hover:bg-black/60 flex items-center justify-center transition-colors"
                 title="Delete story"

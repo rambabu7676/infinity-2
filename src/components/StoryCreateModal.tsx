@@ -51,6 +51,7 @@ export const StoryCreateModal: React.FC<StoryCreateModalProps> = ({
   const [showSoundSelector, setShowSoundSelector] = useState(false);
   const [isPosting, setIsPosting] = useState(false);
   const [mediaFile, setMediaFile] = useState<File | null>(null);
+  const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
   const cameraInputRef = useRef<HTMLInputElement>(null);
@@ -70,6 +71,7 @@ export const StoryCreateModal: React.FC<StoryCreateModalProps> = ({
   };
 
   const handlePostStory = async () => {
+    setErrorMsg(null);
     setIsPosting(true);
     playClickSound();
 
@@ -88,14 +90,17 @@ export const StoryCreateModal: React.FC<StoryCreateModalProps> = ({
         cloudinaryData = cloudResult;
       }
 
+      const now = Date.now();
       const newSlide: StorySlide = {
-        id: `slide-${Date.now()}`,
+        id: `slide-${now}`,
         mediaUrl: finalMediaUrl,
         mediaType: mediaType,
         duration: 5,
         caption: [caption, activeSticker].filter(Boolean).join(' ') || undefined,
         soundTitle: selectedSound ? selectedSound.title : undefined,
         createdAt: 'Just now',
+        timestamp: now,
+        expiresAt: now + 24 * 60 * 60 * 1000,
         cloudinary: cloudinaryData,
       };
 
@@ -112,12 +117,16 @@ export const StoryCreateModal: React.FC<StoryCreateModalProps> = ({
       }
 
       onAddStorySlide(newSlide);
+      setCustomMediaUrl(null);
+      setMediaFile(null);
+      setCaption('');
+      setActiveSticker(null);
       setIsPosting(false);
       onClose();
     } catch (err: any) {
       console.error('Story upload error:', err);
       setIsPosting(false);
-      alert(`Story upload error: ${err.message || 'Failed to upload media to Cloudinary'}`);
+      setErrorMsg(err?.message || 'स्टोरी अपलोड करने में समस्या आई। कृपया पुनः प्रयास करें।');
     }
   };
 
@@ -303,6 +312,12 @@ export const StoryCreateModal: React.FC<StoryCreateModalProps> = ({
               </button>
             ))}
           </div>
+
+          {errorMsg && (
+            <div className="px-3 py-2 rounded-xl bg-red-500/15 border border-red-500/40 text-red-300 text-[11px] font-medium text-center">
+              {errorMsg}
+            </div>
+          )}
 
           {/* Post to Story Action Button */}
           <button

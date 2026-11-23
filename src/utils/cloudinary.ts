@@ -118,8 +118,125 @@ export async function compressImageBeforeUpload(
   });
 }
 
+export type NetworkSpeedTier = 'slow' | 'medium' | 'fast';
+
+interface NetworkConnectionLike {
+  effectiveType?: string;
+  downlink?: number;
+  saveData?: boolean;
+  addEventListener?: (type: string, listener: () => void) => void;
+  removeEventListener?: (type: string, listener: () => void) => void;
+}
+
+function getNavigatorConnection(): NetworkConnectionLike | undefined {
+  if (typeof navigator === 'undefined') return undefined;
+  const nav = navigator as unknown as {
+    connection?: NetworkConnectionLike;
+    mozConnection?: NetworkConnectionLike;
+    webkitConnection?: NetworkConnectionLike;
+  };
+  return nav.connection || nav.mozConnection || nav.webkitConnection;
+}
+
 /**
- * Optimizes Cloudinary URL with f_auto, q_auto and dimensions
+ * Detects current internet speed tier using Network Information API
+ */
+export function getNetworkSpeedTier(): NetworkSpeedTier {
+  const conn = getNavigatorConnection();
+  if (!conn) return 'fast';
+
+  if (conn.saveData) return 'slow';
+
+  const effectiveType = (conn.effectiveType || '').toLowerCase();
+  const downlink = typeof conn.downlink === 'number' ? conn.downlink : undefined;
+
+  if (effectiveType === 'slow-2g' || effectiveType === '2g') {
+    return 'slow';
+  }
+  if (downlink !== undefined && downlink > 0 && downlink < 1.2) {
+    return 'slow';
+  }
+
+  if (effectiveType === '3g' || (downlink !== undefined && downlink < 4.5)) {
+    return 'medium';
+  }
+
+  return 'fast';
+}
+
+export function subscribeToNetworkSpeedChange(
+  onChange: (tier: NetworkSpeedTier) => void
+): () => void {
+  const conn = getNavigatorConnection();
+  if (!conn?.addEventListener || !conn?.removeEventListener) {
+    return () => {};
+  }
+
+  const handleChange = () => {
+    onChange(getNetworkSpeedTier());
+  };
+
+  conn.addEventListener('change', handleChange);
+  return () => {
+    conn.removeEventListener?.('change', handleChange);
+  };
+}
+
+export function getAdaptiveQualityConfig(tier: NetworkSpeedTier = getNetworkSpeedTier()) {
+  if (tier === 'slow') {
+    return {
+      tier,
+      videoWidth: 480,
+      videoBitrate: '500k',
+      imageWidth: 360,
+      unsplashQuality: 55,
+      cloudinaryQuality: 'auto' as const,
+    };
+  }
+  if (tier === 'medium') {
+    return {
+      tier,
+      videoWidth: 720,
+      videoBitrate: '1200k',
+      imageWidth: 540,
+      unsplashQuality: 70,
+      cloudinaryQuality: 'auto' as const,
+    };
+  }
+  return {
+    tier,
+    videoWidth: 1080,
+    videoBitrate: undefined,
+    imageWidth: 720,
+    unsplashQuality: 85,
+    cloudinaryQuality: 'auto' as const,
+  };
+}
+
+const CLOUDINARY_TRANSFORM_SEGMENT_RE =
+  /^(?:(?:f|q|w|h|c|br|so|eo|du|ar|dpr|vc|ac|fl|e|l|g)_[^,/]+)(?:,(?:f|q|w|h|c|br|so|eo|du|ar|dpr|vc|ac|fl|e|l|g)_[^,/]+)*$/;
+
+function applyCloudinaryTransform(url: string, transforms: string): string {
+  const uploadMarker = '/upload/';
+  const uploadIdx = url.indexOf(uploadMarker);
+  if (uploadIdx === -1) return url;
+
+  const prefix = url.slice(0, uploadIdx + uploadMarker.length);
+  const rest = url.slice(uploadIdx + uploadMarker.length);
+  const slashIdx = rest.indexOf('/');
+
+  if (slashIdx !== -1) {
+    const firstSegment = rest.slice(0, slashIdx);
+    if (CLOUDINARY_TRANSFORM_SEGMENT_RE.test(firstSegment)) {
+      return `${prefix}${transforms}${rest.slice(slashIdx)}`;
+    }
+  }
+
+  return `${prefix}${transforms}/${rest}`;
+}
+
+/**
+ * Optimizes Cloudinary URL with f_auto, q_auto and network-adaptive dimensions
  */
 export function getOptimizedCloudinaryUrl(
   url: string,
@@ -128,6 +245,7 @@ export function getOptimizedCloudinaryUrl(
     width?: number;
     height?: number;
     crop?: 'limit' | 'fill' | 'scale';
+    networkTier?: NetworkSpeedTier;
   }
 ): string {
   if (!url || typeof url !== 'string') return url;
@@ -137,39 +255,104 @@ export function getOptimizedCloudinaryUrl(
     return url;
   }
 
-  const resourceType = options?.resourceType || (url.includes('/video/upload/') ? 'video' : 'image');
-  const width = options?.width || (resourceType === 'video' ? 1080 : 1080);
+  const resourceType =
+    options?.resourceType || (url.includes('/video/upload/') ? 'video' : 'image');
+  const adaptive = getAdaptiveQualityConfig(options?.networkTier);
+  const width =
+    options?.width || (resourceType === 'video' ? adaptive.videoWidth : adaptive.imageWidth);
   const crop = options?.crop || 'limit';
 
-  // Construct transformation string: f_auto,q_auto,w_{width},c_{crop}
-  const transforms = `f_auto,q_auto,w_${width},c_${crop}`;
-
-  // If URL already has transformations, avoid duplicate insertion
-  if (url.includes('/upload/f_auto') || url.includes('/upload/q_auto')) {
-    return url;
+  // Always keep quality 'auto' (q_auto) in Cloudinary URLs, adjusting resolution/bitrate by speed
+  const transformParts = [
+    'f_auto',
+    `q_${adaptive.cloudinaryQuality}`,
+    `w_${width}`,
+    `c_${crop}`,
+  ];
+  if (resourceType === 'video' && adaptive.videoBitrate) {
+    transformParts.push(`br_${adaptive.videoBitrate}`);
   }
 
-  // Insert transformations after /upload/
-  return url.replace('/upload/', `/upload/${transforms}/`);
+  return applyCloudinaryTransform(url, transformParts.join(','));
 }
 
 /**
- * Generate video poster thumbnail URL using Cloudinary
+ * Generate video poster thumbnail URL using Cloudinary with q_auto
  */
-export function getCloudinaryVideoThumbnailUrl(videoUrl: string, width = 720): string {
+export function getCloudinaryVideoThumbnailUrl(
+  videoUrl: string,
+  width?: number,
+  networkTier?: NetworkSpeedTier
+): string {
   if (!videoUrl || !videoUrl.includes('res.cloudinary.com')) {
     return videoUrl;
   }
 
-  // Replace file extension with .jpg and add auto frame selection so_auto
-  const cleanUrl = videoUrl.replace(/\.[^/.]+$/, '.jpg');
-  const transforms = `f_auto,q_auto,w_${width},c_limit,so_auto`;
+  const adaptive = getAdaptiveQualityConfig(networkTier);
+  const resolvedWidth = width || adaptive.imageWidth;
 
-  if (cleanUrl.includes('/upload/')) {
-    return cleanUrl.replace('/upload/', `/upload/${transforms}/`);
+  // Replace file extension with .jpg and add auto frame selection so_auto + q_auto
+  const cleanUrl = videoUrl.replace(/\.[^/.]+$/, '.jpg');
+  const transforms = `f_auto,q_auto,w_${resolvedWidth},c_limit,so_auto`;
+
+  return applyCloudinaryTransform(cleanUrl, transforms);
+}
+
+/**
+ * Returns adaptive video URL according to current internet speed
+ * (Cloudinary links always preserve q_auto with adaptive resolution/bitrate)
+ */
+export function getAdaptiveVideoUrl(
+  videoUrl: string,
+  networkTier?: NetworkSpeedTier
+): string {
+  if (!videoUrl || typeof videoUrl !== 'string') return videoUrl;
+
+  if (videoUrl.includes('res.cloudinary.com')) {
+    return getOptimizedCloudinaryUrl(videoUrl, {
+      resourceType: 'video',
+      networkTier,
+    });
   }
 
-  return cleanUrl;
+  return videoUrl;
+}
+
+/**
+ * Returns lightweight thumbnail URL adapted to current internet speed
+ */
+export function getAdaptiveThumbnailUrl(
+  posterOrVideoUrl: string,
+  networkTier?: NetworkSpeedTier
+): string {
+  if (!posterOrVideoUrl || typeof posterOrVideoUrl !== 'string') return posterOrVideoUrl;
+
+  const adaptive = getAdaptiveQualityConfig(networkTier);
+
+  if (posterOrVideoUrl.includes('res.cloudinary.com')) {
+    if (posterOrVideoUrl.includes('/video/upload/')) {
+      return getCloudinaryVideoThumbnailUrl(posterOrVideoUrl, adaptive.imageWidth, adaptive.tier);
+    }
+    return getOptimizedCloudinaryUrl(posterOrVideoUrl, {
+      resourceType: 'image',
+      width: adaptive.imageWidth,
+      networkTier: adaptive.tier,
+    });
+  }
+
+  if (posterOrVideoUrl.includes('images.unsplash.com')) {
+    try {
+      const parsed = new URL(posterOrVideoUrl);
+      parsed.searchParams.set('w', String(adaptive.imageWidth));
+      parsed.searchParams.set('q', String(adaptive.unsplashQuality));
+      parsed.searchParams.set('auto', 'format');
+      return parsed.toString();
+    } catch {
+      return posterOrVideoUrl;
+    }
+  }
+
+  return posterOrVideoUrl;
 }
 
 /**

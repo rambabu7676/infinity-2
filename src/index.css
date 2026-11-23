@@ -32,3 +32,36 @@
 .animate-heart-pop {
   animation: heartPop 0.9s cubic-bezier(0.175, 0.885, 0.32, 1.275) forwards;
 }
+
+@keyframes pageSlideFromRight {
+  0% {
+    transform: translate3d(24%, 0, 0);
+    opacity: 0.72;
+  }
+  100% {
+    transform: translate3d(0, 0, 0);
+    opacity: 1;
+  }
+}
+
+@keyframes pageSlideFromLeft {
+  0% {
+    transform: translate3d(-24%, 0, 0);
+    opacity: 0.72;
+  }
+  100% {
+    transform: translate3d(0, 0, 0);
+    opacity: 1;
+  }
+}
+
+.animate-page-slide-left {
+  animation: pageSlideFromRight 220ms cubic-bezier(0.22, 1, 0.36, 1) both;
+  will-change: transform, opacity;
+}
+
+.animate-page-slide-right {
+  animation: pageSlideFromLeft 220ms cubic-bezier(0.22, 1, 0.36, 1) both;
+  will-change: transform, opacity;
+}
+

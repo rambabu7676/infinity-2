@@ -7,41 +7,396 @@ service cloud.firestore {
       return val is string && val.size() >= minLen && val.size() <= maxLen;
     }
 
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function isOwnerOfContent(data) {
+      return request.auth == null
+        || ('uid' in data && data.uid is string && data.uid == request.auth.uid)
+        || ('user' in data && data.user is string && (
+            (exists(/databases/$(database)/documents/users/$(request.auth.uid))
+              && 'username' in get(/databases/$(database)/documents/users/$(request.auth.uid)).data
+              && get(/databases/$(database)/documents/users/$(request.auth.uid)).data.username == data.user)
+            || (isValidId(data.user)
+                && exists(/databases/$(database)/documents/usernames/$(data.user))
+                && 'uid' in get(/databases/$(database)/documents/usernames/$(data.user)).data
+                && get(/databases/$(database)/documents/usernames/$(data.user)).data.uid == request.auth.uid)
+            || (isValidId(data.user)
+                && exists(/databases/$(database)/documents/users/$(data.user))
+                && 'uid' in get(/databases/$(database)/documents/users/$(data.user)).data
+                && get(/databases/$(database)/documents/users/$(data.user)).data.uid == request.auth.uid)
+        ));
+    }
+
+    function isValidComment(data, reelId, commentId) {
+      return isValidId(reelId)
+        && isValidId(commentId)
+        && data.keys().hasAll(['id', 'reelId', 'uid', 'user', 'text', 'createdAt'])
+        && data.keys().hasOnly(['id', 'reelId', 'uid', 'user', 'avatar', 'text', 'timeAgo', 'likes', 'createdAt'])
+        && data.id == commentId
+        && data.reelId == reelId
+        && isValidString(data.uid, 1, 128)
+        && data.uid != 'guest_user'
+        && (request.auth == null || data.uid == request.auth.uid)
+        && isValidString(data.user, 1, 60)
+        && isValidString(data.text, 1, 1000)
+        && data.createdAt is number
+        && data.createdAt > 0
+        && (!('avatar' in data) || (data.avatar is string && data.avatar.size() <= 500))
+        && (!('timeAgo' in data) || (data.timeAgo is string && data.timeAgo.size() <= 50))
+        && (!('likes' in data) || (data.likes is number && data.likes >= 0));
+    }
+
+    function isValidNotification(data, userId, notificationId) {
+      return isValidId(userId)
+        && isValidId(notificationId)
+        && userId != 'guest_user'
+        && data.keys().hasAll(['id', 'type', 'actorUid', 'actorUsername', 'recipientUid', 'message', 'read', 'createdAt'])
+        && data.keys().hasOnly(['id', 'type', 'actorUid', 'actorUsername', 'actorName', 'actorAvatar', 'recipientUid', 'reelId', 'reelTitle', 'commentText', 'message', 'read', 'createdAt'])
+        && data.id == notificationId
+        && data.recipientUid == userId
+        && data.type in ['like', 'comment', 'follow']
+        && isValidString(data.actorUid, 1, 128)
+        && data.actorUid != 'guest_user'
+        && data.actorUid != userId
+        && (request.auth == null || data.actorUid == request.auth.uid)
+        && isValidString(data.actorUsername, 1, 60)
+        && isValidString(data.message, 1, 500)
+        && data.read == false
+        && data.createdAt is number
+        && data.createdAt > 0
+        && (!('actorName' in data) || (data.actorName is string && data.actorName.size() <= 80))
+        && (!('actorAvatar' in data) || (data.actorAvatar is string && data.actorAvatar.size() <= 500))
+        && (!('reelId' in data) || (data.reelId is string && data.reelId.size() <= 128))
+        && (!('reelTitle' in data) || (data.reelTitle is string && data.reelTitle.size() <= 200))
+        && (!('commentText' in data) || (data.commentText is string && data.commentText.size() <= 200));
+    }
+
+    function isValidBlockedUser(data, userId, blockedKey) {
+      return isValidId(userId)
+        && isValidId(blockedKey)
+        && userId != 'guest_user'
+        && (request.auth == null || userId == request.auth.uid)
+        && data.keys().hasAll(['blockId', 'blockerUid', 'blockerUsername', 'blockedUsername', 'blockedAt'])
+        && data.keys().hasOnly(['blockId', 'blockerUid', 'blockerUsername', 'blockedUid', 'blockedUsername', 'blockedName', 'blockedAvatar', 'blockedAt'])
+        && data.blockerUid == userId
+        && isValidString(data.blockId, 1, 200)
+        && isValidString(data.blockerUsername, 1, 60)
+        && isValidString(data.blockedUsername, 1, 60)
+        && data.blockedAt is number
+        && data.blockedAt > 0
+        && (!('blockedUid' in data) || (data.blockedUid is string && data.blockedUid.size() <= 128))
+        && (!('blockedName' in data) || (data.blockedName is string && data.blockedName.size() <= 80))
+        && (!('blockedAvatar' in data) || (data.blockedAvatar is string && data.blockedAvatar.size() <= 500));
+    }
+
+    function isValidBlockRelation(data, blockId) {
+      return isValidId(blockId)
+        && data.keys().hasAll(['blockId', 'blockerUid', 'blockerUsername', 'blockedUsername', 'createdAt'])
+        && data.keys().hasOnly(['blockId', 'blockerUid', 'blockerUsername', 'blockedUid', 'blockedUsername', 'createdAt'])
+        && data.blockId == blockId
+        && isValidId(data.blockerUid)
+        && data.blockerUid != 'guest_user'
+        && (request.auth == null || data.blockerUid == request.auth.uid)
+        && isValidString(data.blockerUsername, 1, 60)
+        && isValidString(data.blockedUsername, 1, 60)
+        && data.createdAt is number
+        && data.createdAt > 0
+        && (!('blockedUid' in data) || (data.blockedUid is string && data.blockedUid.size() <= 128));
+    }
+
     // Reels collection
     match /reels/{reelId} {
       allow read: if true;
-      allow create, update: if (
-        request.resource.data.title is string
+      allow create: if request.resource.data.title is string
         && request.resource.data.user is string
-        && request.resource.data.videoUrl is string
+        && request.resource.data.videoUrl is string;
+      allow update: if (
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly(['title', 'updatedAt'])
+        && isOwnerOfContent(resource.data)
+        && isValidString(request.resource.data.title, 1, 500)
       ) || (
-        request.resource.data.keys().hasAll(['reportsCount', 'isAutoHidden'])
-        && request.resource.data.reportsCount is number
-        && request.resource.data.isAutoHidden is bool
+        !request.resource.data.diff(resource.data).affectedKeys().hasAny(['title'])
+        && (
+          (request.resource.data.title is string
+            && request.resource.data.user is string
+            && request.resource.data.videoUrl is string)
+          || (request.resource.data.keys().hasAll(['reportsCount', 'isAutoHidden'])
+            && request.resource.data.reportsCount is number
+            && request.resource.data.isAutoHidden is bool)
+          || (request.resource.data.diff(resource.data).affectedKeys().hasOnly(['isAccountHidden', 'updatedAt'])
+            && request.resource.data.isAccountHidden is bool)
+        )
       );
-      allow delete: if false;
+      allow delete: if isOwnerOfContent(resource.data);
+
+      // Reel comments subcollection
+      match /comments/{commentId} {
+        allow read: if true;
+        allow create: if isValidComment(request.resource.data, reelId, commentId);
+        allow update: if false;
+        allow delete: if request.auth == null
+          || resource.data.uid == request.auth.uid
+          || (exists(/databases/$(database)/documents/reels/$(reelId))
+              && isOwnerOfContent(get(/databases/$(database)/documents/reels/$(reelId)).data));
+      }
+
+      // Reel likes subcollection
+      match /likes/{userId} {
+        allow read: if isValidId(reelId) && isValidId(userId);
+        allow create, update: if isValidId(reelId)
+          && isValidId(userId)
+          && userId != 'guest_user'
+          && (request.auth == null || userId == request.auth.uid)
+          && request.resource.data.keys().hasAll(['uid', 'reelId', 'createdAt'])
+          && request.resource.data.keys().hasOnly(['uid', 'reelId', 'createdAt'])
+          && request.resource.data.uid == userId
+          && request.resource.data.reelId == reelId
+          && request.resource.data.createdAt is number;
+        allow delete: if isValidId(reelId)
+          && isValidId(userId)
+          && userId != 'guest_user'
+          && (request.auth == null
+              || userId == request.auth.uid
+              || (exists(/databases/$(database)/documents/reels/$(reelId))
+                  && isOwnerOfContent(get(/databases/$(database)/documents/reels/$(reelId)).data)));
+      }
     }
 
-    // Stories collection
+    // Stories collection (owner-only create/update/delete, no guest writes)
     match /stories/{storyId} {
       allow read: if true;
-      allow create, update: if request.resource.data.username is string;
-      allow delete: if false;
+      allow create, update: if isValidId(storyId)
+        && storyId != 'guest_user'
+        && (request.auth == null || storyId == request.auth.uid)
+        && request.resource.data.keys().hasAll(['id', 'userId', 'username', 'slides'])
+        && request.resource.data.id == storyId
+        && request.resource.data.userId == storyId
+        && isValidString(request.resource.data.username, 1, 60)
+        && request.resource.data.slides is list
+        && request.resource.data.slides.size() <= 30;
+      allow delete: if isValidId(storyId)
+        && storyId != 'guest_user'
+        && resource.data.userId == storyId
+        && (request.auth == null || storyId == request.auth.uid);
     }
 
     // Posts collection
     match /posts/{postId} {
       allow read: if true;
-      allow create, update: if request.resource.data.user is string
-                            && request.resource.data.mediaUrl is string;
-      allow delete: if false;
+      allow create: if request.resource.data.user is string
+        && request.resource.data.mediaUrl is string;
+      allow update: if (
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly(['caption', 'updatedAt'])
+        && isOwnerOfContent(resource.data)
+        && isValidString(request.resource.data.caption, 1, 500)
+      ) || (
+        !request.resource.data.diff(resource.data).affectedKeys().hasAny(['caption'])
+        && (
+          (request.resource.data.user is string
+            && request.resource.data.mediaUrl is string)
+          || (request.resource.data.diff(resource.data).affectedKeys().hasOnly(['isAccountHidden', 'updatedAt'])
+            && request.resource.data.isAccountHidden is bool)
+        )
+      );
+      allow delete: if isOwnerOfContent(resource.data);
     }
 
     // Users collection
     match /users/{userId} {
       allow read: if true;
       allow create, update: if request.resource.data.username is string;
-      allow delete: if false;
+      allow delete: if isValidId(userId)
+        && userId != 'guest_user'
+        && (request.auth == null
+            || userId == request.auth.uid
+            || ('uid' in resource.data && resource.data.uid == request.auth.uid));
+
+      // Saved reels subcollection (per-user bookmarks)
+      match /saved/{reelId} {
+        allow read: if isValidId(userId) && userId != 'guest_user';
+        allow create, update: if isValidId(userId)
+          && isValidId(reelId)
+          && userId != 'guest_user'
+          && (request.auth == null || userId == request.auth.uid)
+          && request.resource.data.keys().hasAll(['reelId', 'uid', 'savedAt'])
+          && request.resource.data.keys().hasOnly(['reelId', 'uid', 'savedAt'])
+          && request.resource.data.reelId == reelId
+          && request.resource.data.uid == userId
+          && request.resource.data.savedAt is number;
+        allow delete: if isValidId(userId)
+          && isValidId(reelId)
+          && userId != 'guest_user'
+          && (request.auth == null || userId == request.auth.uid);
+      }
+
+      // Disliked reels subcollection (per-user dislikes)
+      match /disliked/{reelId} {
+        allow read: if isValidId(userId) && userId != 'guest_user';
+        allow create, update: if isValidId(userId)
+          && isValidId(reelId)
+          && userId != 'guest_user'
+          && (request.auth == null || userId == request.auth.uid)
+          && request.resource.data.keys().hasAll(['reelId', 'uid', 'dislikedAt'])
+          && request.resource.data.keys().hasOnly(['reelId', 'uid', 'dislikedAt'])
+          && request.resource.data.reelId == reelId
+          && request.resource.data.uid == userId
+          && request.resource.data.dislikedAt is number;
+        allow delete: if isValidId(userId)
+          && isValidId(reelId)
+          && userId != 'guest_user'
+          && (request.auth == null || userId == request.auth.uid);
+      }
+
+      // User notifications subcollection
+      match /notifications/{notificationId} {
+        allow get: if isValidId(userId)
+          && isValidId(notificationId)
+          && userId != 'guest_user'
+          && (request.auth == null || userId == request.auth.uid);
+        allow list: if isValidId(userId)
+          && userId != 'guest_user'
+          && (request.auth == null || userId == request.auth.uid);
+        allow create: if isValidId(userId)
+          && isValidNotification(request.resource.data, userId, notificationId);
+        allow update: if isValidId(userId)
+          && isValidId(notificationId)
+          && userId != 'guest_user'
+          && (request.auth == null || userId == request.auth.uid)
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['read'])
+          && request.resource.data.read == true;
+        allow delete: if isValidId(userId)
+          && isValidId(notificationId)
+          && userId != 'guest_user'
+          && (request.auth == null || userId == request.auth.uid);
+      }
+
+      // Following subcollection (per-user followed creators)
+      match /following/{targetUsername} {
+        allow read: if isValidId(userId)
+          && userId != 'guest_user'
+          && (request.auth == null
+              || userId == request.auth.uid
+              || !exists(/databases/$(database)/documents/users/$(userId))
+              || get(/databases/$(database)/documents/users/$(userId)).data.isPrivate != true);
+        allow create, update: if isValidId(userId)
+          && userId != 'guest_user'
+          && (request.auth == null || userId == request.auth.uid);
+        allow delete: if isValidId(userId)
+          && userId != 'guest_user'
+          && (request.auth == null
+              || userId == request.auth.uid
+              || (exists(/databases/$(database)/documents/users/$(request.auth.uid))
+                  && get(/databases/$(database)/documents/users/$(request.auth.uid)).data.username == targetUsername));
+      }
+
+      // Followers subcollection (users who follow this user, hidden from others when isPrivate == true)
+      match /followers/{followerId} {
+        allow read: if isValidId(userId)
+          && userId != 'guest_user'
+          && (request.auth == null
+              || userId == request.auth.uid
+              || !exists(/databases/$(database)/documents/users/$(userId))
+              || get(/databases/$(database)/documents/users/$(userId)).data.isPrivate != true);
+        allow create, update: if isValidId(userId)
+          && isValidId(followerId)
+          && userId != 'guest_user'
+          && followerId != 'guest_user'
+          && (request.auth == null || followerId == request.auth.uid)
+          && request.resource.data.keys().hasAll(['uid', 'username', 'followedAt'])
+          && request.resource.data.keys().hasOnly(['uid', 'username', 'name', 'avatarUrl', 'followedAt'])
+          && request.resource.data.uid == followerId
+          && isValidString(request.resource.data.username, 1, 60)
+          && request.resource.data.followedAt is number
+          && request.resource.data.followedAt > 0
+          && (!('name' in request.resource.data) || (request.resource.data.name is string && request.resource.data.name.size() <= 80))
+          && (!('avatarUrl' in request.resource.data) || (request.resource.data.avatarUrl is string && request.resource.data.avatarUrl.size() <= 500));
+        allow delete: if isValidId(userId)
+          && isValidId(followerId)
+          && userId != 'guest_user'
+          && followerId != 'guest_user'
+          && (request.auth == null
+              || followerId == request.auth.uid
+              || userId == request.auth.uid);
+      }
+
+      // Blocked users subcollection (per-user block list)
+      match /blocked/{blockedKey} {
+        allow get: if isValidId(userId)
+          && isValidId(blockedKey)
+          && userId != 'guest_user'
+          && (request.auth == null || userId == request.auth.uid);
+        allow list: if isValidId(userId)
+          && userId != 'guest_user'
+          && (request.auth == null || userId == request.auth.uid);
+        allow create, update: if isValidBlockedUser(request.resource.data, userId, blockedKey);
+        allow delete: if isValidId(userId)
+          && isValidId(blockedKey)
+          && userId != 'guest_user'
+          && (request.auth == null || userId == request.auth.uid);
+      }
+
+      // Seen stories subcollection (per-user seen/unseen ring tracking)
+      match /seenStories/{storyId} {
+        allow get, list: if isValidId(userId)
+          && userId != 'guest_user'
+          && (request.auth == null || userId == request.auth.uid);
+        allow create, update: if isValidId(userId)
+          && isValidId(storyId)
+          && userId != 'guest_user'
+          && (request.auth == null || userId == request.auth.uid)
+          && request.resource.data.keys().hasAll(['storyId', 'seenAt', 'latestSlideTs'])
+          && request.resource.data.keys().hasOnly(['storyId', 'seenAt', 'latestSlideTs'])
+          && request.resource.data.storyId == storyId
+          && request.resource.data.seenAt is number
+          && request.resource.data.seenAt > 0
+          && request.resource.data.latestSlideTs is number
+          && request.resource.data.latestSlideTs >= 0;
+        allow delete: if isValidId(userId)
+          && isValidId(storyId)
+          && userId != 'guest_user'
+          && (request.auth == null || userId == request.auth.uid);
+      }
+    }
+
+    // Mutual block relation index ('who blocked whom')
+    match /blocks/{blockId} {
+      allow get: if isValidId(blockId)
+        && (request.auth == null
+            || resource == null
+            || resource.data.blockerUid == request.auth.uid
+            || resource.data.blockedUid == request.auth.uid
+            || (exists(/databases/$(database)/documents/users/$(request.auth.uid))
+                && get(/databases/$(database)/documents/users/$(request.auth.uid)).data.username == resource.data.blockedUsername));
+      allow list: if request.auth == null
+        || resource.data.blockerUid == request.auth.uid
+        || resource.data.blockedUid == request.auth.uid
+        || (exists(/databases/$(database)/documents/users/$(request.auth.uid))
+            && get(/databases/$(database)/documents/users/$(request.auth.uid)).data.username == resource.data.blockedUsername);
+      allow create, update: if isValidBlockRelation(request.resource.data, blockId);
+      allow delete: if isValidId(blockId)
+        && resource.data.blockerUid != 'guest_user'
+        && (request.auth == null || resource.data.blockerUid == request.auth.uid);
+    }
+
+    // Unique usernames ownership index
+    match /usernames/{username} {
+      allow read: if true;
+      allow create, update: if isValidId(username)
+        && username.matches('^[a-z0-9_]{3,30}$')
+        && request.resource.data.keys().hasAll(['uid', 'username', 'updatedAt'])
+        && request.resource.data.keys().hasOnly(['uid', 'username', 'updatedAt'])
+        && isValidId(request.resource.data.uid)
+        && request.resource.data.uid != 'guest_user'
+        && (request.auth == null || request.resource.data.uid == request.auth.uid)
+        && request.resource.data.username == username
+        && request.resource.data.updatedAt is number
+        && (!exists(/databases/$(database)/documents/usernames/$(username))
+            || get(/databases/$(database)/documents/usernames/$(username)).data.uid == request.resource.data.uid);
+      allow delete: if isValidId(username)
+        && resource.data.uid != 'guest_user'
+        && (request.auth == null || resource.data.uid == request.auth.uid);
     }
 
     // In-app Feedback & Bug Reports collection
