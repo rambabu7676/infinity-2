@@ -68,6 +68,8 @@ interface ProfileViewProps {
   blockedUsernames?: string[];
   blockedByUsernames?: string[];
   onOpenUserProfile?: (user: FollowListUser) => void;
+  sentFollowRequestUsernames?: string[];
+  onRemoveFollower?: (follower: FollowListUser) => Promise<void> | void;
 }
 
 export const ProfileView: React.FC<ProfileViewProps> = ({
@@ -88,6 +90,8 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
   blockedUsernames = [],
   blockedByUsernames = [],
   onOpenUserProfile,
+  sentFollowRequestUsernames = [],
+  onRemoveFollower,
 }) => {
   const { t } = useLanguage();
   const [activeProfileTab, setActiveProfileTab] = useState<'posts' | 'saved'>('posts');
@@ -1195,6 +1199,7 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
         currentUserProfile={userProfile}
         blockedUsernames={blockedUsernames}
         blockedByUsernames={blockedByUsernames}
+        sentFollowRequestUsernames={sentFollowRequestUsernames}
         onClose={() => setShowFollowingModal(false)}
         onToggleFollow={onToggleFollow}
         onSelectUser={(user) => {
@@ -1214,8 +1219,10 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
         currentUserProfile={userProfile}
         blockedUsernames={blockedUsernames}
         blockedByUsernames={blockedByUsernames}
+        sentFollowRequestUsernames={sentFollowRequestUsernames}
         onClose={() => setShowFollowersModal(false)}
         onToggleFollow={onToggleFollow}
+        onRemoveFollower={onRemoveFollower}
         onSelectUser={(user) => {
           setShowFollowersModal(false);
           onOpenUserProfile?.(user);

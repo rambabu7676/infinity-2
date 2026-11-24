@@ -110,6 +110,7 @@
         "deletionScheduledAt": { "type": ["number", "null"] },
         "deletionDays": { "type": ["number", "null"] },
         "isAccountHidden": { "type": "boolean" },
+        "isPrivate": { "type": "boolean" },
         "preferredLanguage": { "type": "string", "enum": ["hi", "en"] }
       },
       "required": ["name", "username"]
@@ -154,9 +155,54 @@
         "text": { "type": "string", "maxLength": 1000 },
         "timeAgo": { "type": "string" },
         "likes": { "type": "number" },
+        "repliesCount": { "type": "number" },
         "createdAt": { "type": "number" }
       },
       "required": ["id", "reelId", "uid", "user", "text", "createdAt"]
+    },
+    "CommentLike": {
+      "title": "CommentLike",
+      "description": "Per-user like marker on a comment stored under reels/{reelId}/comments/{commentId}/likes/{userId}",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string" },
+        "commentId": { "type": "string" },
+        "reelId": { "type": "string" },
+        "createdAt": { "type": "number" }
+      },
+      "required": ["uid", "commentId", "reelId", "createdAt"]
+    },
+    "CommentReply": {
+      "title": "CommentReply",
+      "description": "Reply to a reel comment stored under reels/{reelId}/comments/{commentId}/replies/{replyId}",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "reelId": { "type": "string" },
+        "commentId": { "type": "string" },
+        "uid": { "type": "string" },
+        "user": { "type": "string" },
+        "avatar": { "type": "string" },
+        "text": { "type": "string", "maxLength": 1000 },
+        "replyToUsername": { "type": "string" },
+        "timeAgo": { "type": "string" },
+        "likes": { "type": "number" },
+        "createdAt": { "type": "number" }
+      },
+      "required": ["id", "reelId", "commentId", "uid", "user", "text", "createdAt"]
+    },
+    "CommentReplyLike": {
+      "title": "CommentReplyLike",
+      "description": "Per-user like marker on a comment reply stored under reels/{reelId}/comments/{commentId}/replies/{replyId}/likes/{userId}",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string" },
+        "replyId": { "type": "string" },
+        "commentId": { "type": "string" },
+        "reelId": { "type": "string" },
+        "createdAt": { "type": "number" }
+      },
+      "required": ["uid", "replyId", "commentId", "reelId", "createdAt"]
     },
     "SavedReel": {
       "title": "SavedReel",
@@ -279,6 +325,37 @@
         "followedAt": { "type": "number" }
       },
       "required": ["uid", "username", "followedAt"]
+    },
+    "FollowRequest": {
+      "title": "FollowRequest",
+      "description": "Pending incoming follow request for a private account stored under users/{userId}/followRequests/{requesterUid}",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "requesterUid": { "type": "string", "maxLength": 128 },
+        "requesterUsername": { "type": "string", "maxLength": 60 },
+        "requesterName": { "type": "string", "maxLength": 80 },
+        "requesterAvatar": { "type": "string", "maxLength": 500 },
+        "targetUid": { "type": "string", "maxLength": 128 },
+        "targetUsername": { "type": "string", "maxLength": 60 },
+        "createdAt": { "type": "number" }
+      },
+      "required": ["id", "requesterUid", "requesterUsername", "targetUid", "targetUsername", "createdAt"]
+    },
+    "SentFollowRequest": {
+      "title": "SentFollowRequest",
+      "description": "Pending outgoing follow request stored under users/{userId}/sentFollowRequests/{targetUsername}",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "requesterUid": { "type": "string", "maxLength": 128 },
+        "targetUid": { "type": "string", "maxLength": 128 },
+        "targetUsername": { "type": "string", "maxLength": 60 },
+        "targetName": { "type": "string", "maxLength": 80 },
+        "targetAvatar": { "type": "string", "maxLength": 500 },
+        "createdAt": { "type": "number" }
+      },
+      "required": ["id", "requesterUid", "targetUid", "targetUsername", "createdAt"]
     }
   },
   "firestore": {
@@ -293,6 +370,18 @@
     "/reels/{reelId}/comments/{commentId}": {
       "schema": "ReelComment",
       "description": "Public reel comments subcollection readable by all users and writable by logged-in users"
+    },
+    "/reels/{reelId}/comments/{commentId}/likes/{userId}": {
+      "schema": "CommentLike",
+      "description": "Per-comment likes subcollection keyed by liker uid"
+    },
+    "/reels/{reelId}/comments/{commentId}/replies/{replyId}": {
+      "schema": "CommentReply",
+      "description": "Replies subcollection under a reel comment"
+    },
+    "/reels/{reelId}/comments/{commentId}/replies/{replyId}/likes/{userId}": {
+      "schema": "CommentReplyLike",
+      "description": "Per-reply likes subcollection keyed by liker uid"
     },
     "/stories/{storyId}": {
       "schema": "Story",
@@ -333,6 +422,14 @@
     "/users/{userId}/followers/{followerId}": {
       "schema": "FollowerUser",
       "description": "Per-user followers subcollection"
+    },
+    "/users/{userId}/followRequests/{requesterUid}": {
+      "schema": "FollowRequest",
+      "description": "Pending incoming follow requests for a private user"
+    },
+    "/users/{userId}/sentFollowRequests/{targetUsername}": {
+      "schema": "SentFollowRequest",
+      "description": "Pending outgoing follow requests sent by a user"
     },
     "/users/{userId}/blocked/{blockedKey}": {
       "schema": "BlockedUser",

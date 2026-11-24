@@ -398,6 +398,17 @@ export interface TranslationBundle {
     micPermissionNotice: string;
     voiceFallbackNotice: string;
     voiceAddedNotice: string;
+    replyBtn: string;
+    replyingToBanner: (username: string) => string;
+    replyPlaceholder: (username: string) => string;
+    viewRepliesBtn: (count: number) => string;
+    hideRepliesBtn: string;
+    deleteCommentBtn: string;
+    commentDeletedNotice: string;
+    loadingComments: string;
+    guestCommentLikeAlert: string;
+    guestCommentReplyAlert: string;
+    guestCommentDeleteAlert: string;
     moreMenu: {
       editCaption: string;
       deleteReel: string;
@@ -728,7 +739,7 @@ export const translations: Record<AppLanguage, TranslationBundle> = {
       infinityUser: 'Infinity यूज़र',
       switchAuth: 'खाता बदलें',
       logIn: 'लॉगिन',
-      accountPrivacy: 'अकाउंट प्राइवेसी',
+      accountPrivacy: 'प्राइवेट अकाउंट',
       privacyPolicy: '🛡️ प्राइवेसी नियम और शर्तें',
       dailyLimits: '📊 रोज़ की सीमा',
       dailyLimitsSub: '200 फ़ॉलो / 100 अनफ़ॉलो',
@@ -925,6 +936,17 @@ export const translations: Record<AppLanguage, TranslationBundle> = {
       micPermissionNotice: '⚠️ बोलकर लिखने के लिए माइक की अनुमति दें',
       voiceFallbackNotice: '🎙️ सुझाव जोड़ दिया गया!',
       voiceAddedNotice: '🎙️ सुझाव जुड़ गया!',
+      replyBtn: 'जवाब दें',
+      replyingToBanner: (username) => `@${username} को जवाब`,
+      replyPlaceholder: (username) => `@${username} को जवाब लिखें...`,
+      viewRepliesBtn: (count) => `जवाब देखें (${count})`,
+      hideRepliesBtn: 'जवाब छिपाएँ',
+      deleteCommentBtn: 'मिटाएँ',
+      commentDeletedNotice: 'कमेंट मिटाया गया',
+      loadingComments: 'कमेंट्स लोड हो रहे हैं...',
+      guestCommentLikeAlert: 'लॉगिन करें',
+      guestCommentReplyAlert: 'लॉगिन करें',
+      guestCommentDeleteAlert: 'लॉगिन करें',
       moreMenu: {
         editCaption: 'कैप्शन बदलें',
         deleteReel: 'रील मिटाएँ',
@@ -1264,7 +1286,7 @@ export const translations: Record<AppLanguage, TranslationBundle> = {
       infinityUser: 'Infinity User',
       switchAuth: 'Switch / Auth',
       logIn: 'Log In',
-      accountPrivacy: 'Account Privacy',
+      accountPrivacy: 'Private Account',
       privacyPolicy: '🛡️ Privacy Policy & Terms',
       dailyLimits: '📊 Daily Limits',
       dailyLimitsSub: '200 Follows / 100 Unfollows',
@@ -1461,6 +1483,17 @@ export const translations: Record<AppLanguage, TranslationBundle> = {
       micPermissionNotice: '⚠️ Microphone permission required for voice typing',
       voiceFallbackNotice: '🎙️ Voice suggestion added!',
       voiceAddedNotice: '🎙️ Voice suggestion added!',
+      replyBtn: 'Reply',
+      replyingToBanner: (username) => `Replying to @${username}`,
+      replyPlaceholder: (username) => `Reply to @${username}...`,
+      viewRepliesBtn: (count) => `View replies (${count})`,
+      hideRepliesBtn: 'Hide replies',
+      deleteCommentBtn: 'Delete',
+      commentDeletedNotice: 'Comment deleted',
+      loadingComments: 'Loading comments...',
+      guestCommentLikeAlert: 'Please log in',
+      guestCommentReplyAlert: 'Please log in',
+      guestCommentDeleteAlert: 'Please log in',
       moreMenu: {
         editCaption: 'Edit Caption',
         deleteReel: 'Delete Reel',

@@ -17,8 +17,10 @@ interface FollowListModalProps {
   currentUserProfile?: UserProfile;
   blockedUsernames?: string[];
   blockedByUsernames?: string[];
+  sentFollowRequestUsernames?: string[];
   onClose: () => void;
   onToggleFollow?: (username: string) => void;
+  onRemoveFollower?: (follower: FollowListUser) => Promise<void> | void;
   onSelectUser?: (user: FollowListUser) => void;
 }
 
@@ -32,8 +34,10 @@ export const FollowListModal: React.FC<FollowListModalProps> = ({
   currentUserProfile,
   blockedUsernames = [],
   blockedByUsernames = [],
+  sentFollowRequestUsernames = [],
   onClose,
   onToggleFollow,
+  onRemoveFollower,
   onSelectUser,
 }) => {
   const [users, setUsers] = useState<FollowListUser[]>([]);
@@ -45,6 +49,7 @@ export const FollowListModal: React.FC<FollowListModalProps> = ({
   const [usedFallbackOrder, setUsedFallbackOrder] = useState(false);
   const [isPrivateRestricted, setIsPrivateRestricted] = useState(false);
   const [guestNotice, setGuestNotice] = useState<string | null>(null);
+  const [removingUsername, setRemovingUsername] = useState<string | null>(null);
 
   const requestSeqRef = useRef(0);
   const scrollContainerRef = useRef<HTMLDivElement>(null);
@@ -65,6 +70,12 @@ export const FollowListModal: React.FC<FollowListModalProps> = ({
           currentUserProfile.username === targetUsername))
   );
 
+  const viewerIsFollowingTarget = Boolean(
+    !isGuest &&
+      targetUsername &&
+      currentUserProfile?.followingList?.includes(targetUsername)
+  );
+
   const blockedAllSet = React.useMemo(
     () => new Set<string>([...blockedUsernames, ...blockedByUsernames]),
     [blockedUsernames, blockedByUsernames]
@@ -76,12 +87,13 @@ export const FollowListModal: React.FC<FollowListModalProps> = ({
 
     setSearchQuery('');
     setGuestNotice(null);
+    setRemovingUsername(null);
     setUsers([]);
     setLastDoc(null);
     setHasMore(false);
     setUsedFallbackOrder(false);
 
-    if (targetIsPrivate && !isOwner) {
+    if (targetIsPrivate && !isOwner && !viewerIsFollowingTarget) {
       setIsPrivateRestricted(true);
       setIsLoading(false);
       return;
@@ -130,7 +142,17 @@ export const FollowListModal: React.FC<FollowListModalProps> = ({
           setIsLoading(false);
         }
       });
-  }, [isOpen, mode, targetUid, targetUsername, targetIsPrivate, isOwner, isGuest, currentUserProfile?.uid]);
+  }, [
+    isOpen,
+    mode,
+    targetUid,
+    targetUsername,
+    targetIsPrivate,
+    isOwner,
+    viewerIsFollowingTarget,
+    isGuest,
+    currentUserProfile?.uid,
+  ]);
 
   const loadMore = useCallback(async () => {
     if (
@@ -219,6 +241,7 @@ export const FollowListModal: React.FC<FollowListModalProps> = ({
     typeof totalCount === 'number' ? Math.max(0, totalCount) : visibleUsers.length;
   const headerTitle = mode === 'followers' ? 'फ़ॉलोअर्स' : 'फ़ॉलोइंग';
   const followingSet = new Set(currentUserProfile?.followingList || []);
+  const sentRequestSet = new Set(sentFollowRequestUsernames || []);
 
   const handleActionClick = (username: string) => {
     if (isGuest) {
@@ -228,6 +251,18 @@ export const FollowListModal: React.FC<FollowListModalProps> = ({
     }
     playClickSound();
     onToggleFollow?.(username);
+  };
+
+  const handleRemoveClick = async (follower: FollowListUser) => {
+    if (!onRemoveFollower || removingUsername) return;
+    playClickSound();
+    setRemovingUsername(follower.username);
+    try {
+      await onRemoveFollower(follower);
+      setUsers((prev) => prev.filter((u) => u.username !== follower.username));
+    } finally {
+      setRemovingUsername(null);
+    }
   };
 
   return (
@@ -341,6 +376,9 @@ export const FollowListModal: React.FC<FollowListModalProps> = ({
                           currentUserProfile.username === item.username)
                     );
                     const isFollowingItem = followingSet.has(item.username);
+                    const isSentRequestItem =
+                      !isFollowingItem && Boolean(item.isPrivate) && sentRequestSet.has(item.username);
+                    const isRemovingThis = removingUsername === item.username;
 
                     return (
                       <div
@@ -383,21 +421,42 @@ export const FollowListModal: React.FC<FollowListModalProps> = ({
                           </div>
                         </button>
 
-                        {!isMe && onToggleFollow && (
+                        {!isMe && mode === 'followers' && isOwner && onRemoveFollower ? (
                           <button
                             type="button"
+                            disabled={isRemovingThis}
                             onClick={(e) => {
                               e.stopPropagation();
-                              handleActionClick(item.username);
+                              void handleRemoveClick(item);
                             }}
-                            className={`px-3 py-1.5 rounded-full text-xs font-semibold transition-all shrink-0 active:scale-95 ${
-                              isFollowingItem
-                                ? 'bg-zinc-800 hover:bg-rose-950/50 hover:text-rose-300 text-zinc-200 border border-zinc-700/80'
-                                : 'bg-[#00FF88] hover:bg-[#00e57a] text-black font-bold'
-                            }`}
+                            className="px-3 py-1.5 rounded-full text-xs font-semibold transition-all shrink-0 active:scale-95 bg-black hover:bg-zinc-900 text-white border border-zinc-700 disabled:opacity-50"
                           >
-                            {isFollowingItem ? 'फ़ॉलोइंग' : 'फ़ॉलो करें'}
+                            {isRemovingThis ? '...' : 'हटाएँ'}
                           </button>
+                        ) : (
+                          !isMe &&
+                          onToggleFollow && (
+                            <button
+                              type="button"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                handleActionClick(item.username);
+                              }}
+                              className={`px-3 py-1.5 rounded-full text-xs font-semibold transition-all shrink-0 active:scale-95 ${
+                                isFollowingItem || isSentRequestItem
+                                  ? 'bg-zinc-800 hover:bg-zinc-700 text-white border border-zinc-700/80'
+                                  : 'bg-[#00FF88] hover:bg-[#00e57a] text-black font-bold'
+                              }`}
+                            >
+                              {isFollowingItem
+                                ? 'फ़ॉलोइंग'
+                                : isSentRequestItem
+                                ? 'रिक्वेस्ट भेजी गई'
+                                : item.isPrivate
+                                ? 'रिक्वेस्ट भेजें'
+                                : 'फ़ॉलो करें'}
+                            </button>
+                          )
                         )}
                       </div>
                     );

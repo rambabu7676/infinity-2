@@ -16,13 +16,15 @@ import {
   MessageCircle,
   UserPlus,
   Ban,
+  Lock,
 } from 'lucide-react';
-import { ReelItem, UserProfile, NotificationItem, FollowListUser } from '../types';
+import { ReelItem, UserProfile, NotificationItem, FollowListUser, FollowRequestItem } from '../types';
 import { playClickSound } from '../utils/audio';
 import {
   searchReelsAndUsersInFirebase,
   getUserReelsFromFirebase,
   getUserFollowCountsFromFirebase,
+  getUserProfileFromFirebase,
   resolveFullUserProfileForNavigation,
 } from '../firebase/services';
 import { getAdaptiveThumbnailUrl, getAdaptiveVideoUrl } from '../utils/cloudinary';
@@ -238,13 +240,21 @@ interface NotificationsModalProps {
   isOpen: boolean;
   onClose: () => void;
   notifications?: NotificationItem[];
+  followRequests?: FollowRequestItem[];
+  onAcceptFollowRequest?: (req: FollowRequestItem) => Promise<void> | void;
+  onDeclineFollowRequest?: (req: FollowRequestItem) => Promise<void> | void;
 }
 
 export const NotificationsModal: React.FC<NotificationsModalProps> = ({
   isOpen,
   onClose,
   notifications = [],
+  followRequests = [],
+  onAcceptFollowRequest,
+  onDeclineFollowRequest,
 }) => {
+  const [busyRequestUid, setBusyRequestUid] = useState<string | null>(null);
+
   if (!isOpen) return null;
 
   const sortedNotifications = [...notifications].sort(
@@ -275,7 +285,7 @@ export const NotificationsModal: React.FC<NotificationsModalProps> = ({
 
   return (
     <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-3 select-none">
-      <div className="w-full max-w-sm max-h-[520px] min-h-[340px] bg-[#1A1A1A] border border-zinc-800 rounded-2xl flex flex-col shadow-2xl overflow-hidden animate-scaleUp">
+      <div className="w-full max-w-sm max-h-[520px] min-h-[340px] bg-black border border-zinc-800 rounded-2xl flex flex-col shadow-2xl overflow-hidden animate-scaleUp">
         <div className="px-4 py-3 border-b border-zinc-800 flex items-center justify-between shrink-0">
           <div className="flex items-center gap-2">
             <Bell size={16} className="text-[#00FF88]" />
@@ -287,6 +297,91 @@ export const NotificationsModal: React.FC<NotificationsModalProps> = ({
         </div>
 
         <div className="flex-1 overflow-y-auto divide-y divide-zinc-800/60 p-2">
+          {/* Follow Requests Section */}
+          {followRequests.length > 0 && (
+            <div className="pb-2 mb-1 space-y-2">
+              <div className="px-2 pt-1 flex items-center justify-between">
+                <div className="flex items-center gap-1.5">
+                  <UserPlus size={13} className="text-[#00FF88]" />
+                  <span className="text-xs font-extrabold text-white">फ़ॉलो रिक्वेस्ट</span>
+                </div>
+                <span className="text-[10px] font-bold bg-[#00FF88] text-black px-2 py-0.5 rounded-full">
+                  {followRequests.length}
+                </span>
+              </div>
+
+              <div className="space-y-1.5">
+                {followRequests.map((req) => {
+                  const isBusy = busyRequestUid === req.requesterUid;
+                  return (
+                    <div
+                      key={req.requesterUid}
+                      className="p-2.5 rounded-xl bg-zinc-950 border border-zinc-800 flex items-center justify-between gap-2"
+                    >
+                      <div className="flex items-center gap-2.5 min-w-0 flex-1">
+                        <img
+                          src={
+                            req.requesterAvatar ||
+                            `https://api.dicebear.com/7.x/avataaars/svg?seed=${encodeURIComponent(
+                              req.requesterUsername || 'user'
+                            )}`
+                          }
+                          alt={req.requesterName || req.requesterUsername}
+                          className="w-9 h-9 rounded-full object-cover border border-zinc-700 shrink-0 bg-zinc-900"
+                        />
+                        <div className="min-w-0">
+                          <p className="text-xs font-bold text-white truncate">
+                            {req.requesterName || req.requesterUsername}
+                          </p>
+                          <p className="text-[11px] text-zinc-400 truncate">
+                            @{req.requesterUsername}
+                          </p>
+                        </div>
+                      </div>
+
+                      <div className="flex items-center gap-1.5 shrink-0">
+                        <button
+                          type="button"
+                          disabled={isBusy}
+                          onClick={async () => {
+                            if (!onAcceptFollowRequest) return;
+                            playClickSound();
+                            setBusyRequestUid(req.requesterUid);
+                            try {
+                              await onAcceptFollowRequest(req);
+                            } finally {
+                              setBusyRequestUid(null);
+                            }
+                          }}
+                          className="px-2.5 py-1.5 rounded-lg bg-[#00FF88] hover:bg-[#00e57a] text-black font-bold text-[11px] active:scale-95 transition-all disabled:opacity-50"
+                        >
+                          {isBusy ? '...' : 'मंज़ूर करें'}
+                        </button>
+                        <button
+                          type="button"
+                          disabled={isBusy}
+                          onClick={async () => {
+                            if (!onDeclineFollowRequest) return;
+                            playClickSound();
+                            setBusyRequestUid(req.requesterUid);
+                            try {
+                              await onDeclineFollowRequest(req);
+                            } finally {
+                              setBusyRequestUid(null);
+                            }
+                          }}
+                          className="px-2.5 py-1.5 rounded-lg bg-black border border-zinc-700 hover:bg-zinc-900 text-white font-semibold text-[11px] active:scale-95 transition-all disabled:opacity-50"
+                        >
+                          हटाएँ
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+
           {sortedNotifications.length > 0 ? (
             sortedNotifications.map((n) => (
               <div
@@ -322,14 +417,14 @@ export const NotificationsModal: React.FC<NotificationsModalProps> = ({
                 </div>
               </div>
             ))
-          ) : (
+          ) : followRequests.length === 0 ? (
             <div className="h-full min-h-[240px] flex flex-col items-center justify-center text-center px-6 py-10">
               <div className="w-12 h-12 rounded-full bg-zinc-900 border border-zinc-800 flex items-center justify-center mb-3 text-zinc-500">
                 <Bell size={20} />
               </div>
               <p className="text-sm font-bold text-zinc-300">अभी कोई नोटिफ़िकेशन नहीं</p>
             </div>
-          )}
+          ) : null}
         </div>
       </div>
     </div>
@@ -344,6 +439,8 @@ interface SearchModalProps {
   onToggleFollow?: (username: string) => void;
   blockedUsernames?: string[];
   blockedByUsernames?: string[];
+  privateUsernames?: string[];
+  sentFollowRequestUsernames?: string[];
   onBlockUser?: (target: {
     username: string;
     uid?: string;
@@ -361,6 +458,8 @@ export const SearchModal: React.FC<SearchModalProps> = ({
   onToggleFollow,
   blockedUsernames = [],
   blockedByUsernames = [],
+  privateUsernames = [],
+  sentFollowRequestUsernames = [],
   onBlockUser,
   initialSelectedUser = null,
 }) => {
@@ -371,6 +470,7 @@ export const SearchModal: React.FC<SearchModalProps> = ({
 
   // Selected user profile view state
   const [selectedUser, setSelectedUser] = useState<UserProfile | null>(null);
+  const [selectedUserFreshPrivate, setSelectedUserFreshPrivate] = useState<boolean | null>(null);
   const [selectedUserReels, setSelectedUserReels] = useState<ReelItem[]>([]);
   const [isLoadingUserReels, setIsLoadingUserReels] = useState(false);
   const [guestFollowNotice, setGuestFollowNotice] = useState<string | null>(null);
@@ -389,6 +489,7 @@ export const SearchModal: React.FC<SearchModalProps> = ({
   useEffect(() => {
     if (!isOpen) {
       setSelectedUser(null);
+      setSelectedUserFreshPrivate(null);
       setSelectedUserReels([]);
       setGuestFollowNotice(null);
       setShowBlockConfirm(false);
@@ -396,6 +497,7 @@ export const SearchModal: React.FC<SearchModalProps> = ({
       setSelectedUserFollowCounts(null);
     } else if (initialSelectedUser) {
       setSelectedUser(initialSelectedUser);
+      setSelectedUserFreshPrivate(null);
       setFollowListModalMode(null);
       setGuestFollowNotice(null);
       setShowBlockConfirm(false);
@@ -422,10 +524,24 @@ export const SearchModal: React.FC<SearchModalProps> = ({
     return () => clearTimeout(timer);
   }, [isOpen, searchTerm]);
 
-  // Load selected user's real Firebase reels & follow counts when tapped
+  const privateUsersSet = React.useMemo(
+    () => new Set<string>(privateUsernames),
+    [privateUsernames]
+  );
+  const sentRequestSet = React.useMemo(
+    () => new Set<string>(sentFollowRequestUsernames),
+    [sentFollowRequestUsernames]
+  );
+  const followingSet = React.useMemo(
+    () => new Set<string>(currentUserProfile?.followingList || []),
+    [currentUserProfile?.followingList]
+  );
+
+  // Load selected user's fresh privacy status, reels & follow counts when tapped
   useEffect(() => {
     if (!selectedUser) {
       setSelectedUserFollowCounts(null);
+      setSelectedUserFreshPrivate(null);
       return;
     }
     if (
@@ -437,30 +553,77 @@ export const SearchModal: React.FC<SearchModalProps> = ({
       setIsLoadingUserReels(false);
       return;
     }
+
     const seq = ++userRequestSeqRef.current;
+    const targetId = selectedUser.uid || selectedUser.username;
+    const viewerIsOwner = Boolean(
+      currentUserProfile &&
+        !currentUserProfile.isGuest &&
+        ((currentUserProfile.uid && currentUserProfile.uid === selectedUser.uid) ||
+          currentUserProfile.username === selectedUser.username)
+    );
+    const viewerFollowsTarget = Boolean(
+      !currentUserProfile?.isGuest &&
+        currentUserProfile?.followingList?.includes(selectedUser.username)
+    );
+
     setIsLoadingUserReels(true);
 
-    getUserReelsFromFirebase(selectedUser.username).then((fetchedReels) => {
+    const loadSelectedUserData = async () => {
+      const freshProfile = targetId ? await getUserProfileFromFirebase(targetId) : null;
       if (seq !== userRequestSeqRef.current) return;
-      setSelectedUserReels(fetchedReels);
-      setIsLoadingUserReels(false);
-    });
 
-    const targetId = selectedUser.uid || selectedUser.username;
-    if (targetId) {
-      getUserFollowCountsFromFirebase(targetId).then((counts) => {
-        if (seq !== userRequestSeqRef.current) return;
+      const effectivePrivate = Boolean(
+        (freshProfile ? freshProfile.isPrivate : selectedUser.isPrivate) ||
+          privateUsersSet.has(selectedUser.username)
+      );
+      setSelectedUserFreshPrivate(effectivePrivate);
+
+      const canViewContent = !effectivePrivate || viewerIsOwner || viewerFollowsTarget;
+      if (!canViewContent) {
+        setSelectedUserReels([]);
+        setIsLoadingUserReels(false);
+        return;
+      }
+
+      const [fetchedReels, counts] = await Promise.all([
+        getUserReelsFromFirebase(selectedUser.username),
+        targetId ? getUserFollowCountsFromFirebase(targetId) : Promise.resolve(null),
+      ]);
+      if (seq !== userRequestSeqRef.current) return;
+
+      setSelectedUserReels(fetchedReels);
+      if (counts) {
         setSelectedUserFollowCounts(counts);
-      });
-    }
-  }, [selectedUser, blockedUsernames, blockedByUsernames]);
+      }
+      setIsLoadingUserReels(false);
+    };
+
+    void loadSelectedUserData();
+  }, [
+    selectedUser,
+    blockedUsernames,
+    blockedByUsernames,
+    privateUsersSet,
+    currentUserProfile?.uid,
+    currentUserProfile?.isGuest,
+    currentUserProfile?.username,
+    currentUserProfile?.followingList,
+  ]);
 
   if (!isOpen) return null;
 
   const blockedByMeSet = new Set<string>(blockedUsernames);
   const blockedAllSet = new Set<string>([...blockedUsernames, ...blockedByUsernames]);
   const visibleUserResults = userResults.filter((u) => !blockedByMeSet.has(u.username));
-  const visibleReelResults = reelResults.filter((r) => !blockedAllSet.has(r.user));
+  const visibleReelResults = reelResults.filter((r) => {
+    if (blockedAllSet.has(r.user)) return false;
+    const isOwn = Boolean(!currentUserProfile?.isGuest && currentUserProfile?.username === r.user);
+    if (privateUsersSet.has(r.user) && !isOwn && !followingSet.has(r.user)) {
+      return false;
+    }
+    return true;
+  });
 
   const trimmedTerm = searchTerm.trim();
   const totalResultsCount = visibleUserResults.length + visibleReelResults.length;
@@ -481,15 +644,48 @@ export const SearchModal: React.FC<SearchModalProps> = ({
     setShowBlockConfirm(false);
     setFollowListModalMode(null);
     setSelectedUserFollowCounts(null);
+    setSelectedUserFreshPrivate(null);
     setSelectedUserReels([]);
     setSelectedUser(user);
   };
+
+  const isFollowingSelectedUser = Boolean(
+    selectedUser &&
+      !currentUserProfile?.isGuest &&
+      currentUserProfile?.followingList?.includes(selectedUser.username)
+  );
+  const isOwnProfile = Boolean(
+    selectedUser &&
+      currentUserProfile &&
+      !currentUserProfile.isGuest &&
+      ((currentUserProfile.uid && currentUserProfile.uid === selectedUser.uid) ||
+        currentUserProfile.username === selectedUser.username)
+  );
+  const isSelectedUserPrivate = Boolean(
+    selectedUser &&
+      (selectedUserFreshPrivate !== null
+        ? selectedUserFreshPrivate
+        : Boolean(selectedUser.isPrivate) || privateUsersSet.has(selectedUser.username))
+  );
+  const canViewSelectedUserPrivateContent = Boolean(
+    !isSelectedUserPrivate || isOwnProfile || isFollowingSelectedUser
+  );
+  const hasSentRequestToSelectedUser = Boolean(
+    selectedUser &&
+      isSelectedUserPrivate &&
+      !isFollowingSelectedUser &&
+      sentRequestSet.has(selectedUser.username)
+  );
 
   const handleToggleFollowWithCountSync = (targetUsername: string) => {
     if (!onToggleFollow) return;
     const wasFollowing = Boolean(currentUserProfile?.followingList?.includes(targetUsername));
     onToggleFollow(targetUsername);
-    if (selectedUser && selectedUser.username === targetUsername) {
+    const targetIsPriv =
+      selectedUser && selectedUser.username === targetUsername
+        ? isSelectedUserPrivate
+        : privateUsersSet.has(targetUsername);
+    if (selectedUser && selectedUser.username === targetUsername && (wasFollowing || !targetIsPriv)) {
       setSelectedUserFollowCounts((prev) => {
         const baseFollowers = prev ? prev.followers : selectedUser.followers || 0;
         const baseFollowing = prev ? prev.following : selectedUser.following || 0;
@@ -500,18 +696,6 @@ export const SearchModal: React.FC<SearchModalProps> = ({
       });
     }
   };
-
-  const isFollowingSelectedUser = Boolean(
-    selectedUser &&
-      currentUserProfile?.followingList?.includes(selectedUser.username)
-  );
-  const isOwnProfile = Boolean(
-    selectedUser &&
-      currentUserProfile &&
-      !currentUserProfile.isGuest &&
-      ((currentUserProfile.uid && currentUserProfile.uid === selectedUser.uid) ||
-        currentUserProfile.username === selectedUser.username)
-  );
 
   const isSelectedUserBlocked = Boolean(
     selectedUser && blockedAllSet.has(selectedUser.username)
@@ -590,34 +774,36 @@ export const SearchModal: React.FC<SearchModalProps> = ({
                       </div>
                       <p className="text-xs text-zinc-400 truncate">@{selectedUser.username}</p>
 
-                      <div className="flex items-center gap-4 mt-2 text-[11px]">
-                        <div>
-                          <span className="font-bold text-white">{selectedUserReels.length}</span>{' '}
-                          <span className="text-zinc-400">रील्स</span>
+                      {canViewSelectedUserPrivateContent && (
+                        <div className="flex items-center gap-4 mt-2 text-[11px]">
+                          <div>
+                            <span className="font-bold text-white">{selectedUserReels.length}</span>{' '}
+                            <span className="text-zinc-400">रील्स</span>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              playClickSound();
+                              setFollowListModalMode('followers');
+                            }}
+                            className="hover:opacity-80 active:scale-95 transition-transform cursor-pointer"
+                          >
+                            <span className="font-bold text-white">{displayedFollowersCount}</span>{' '}
+                            <span className="text-zinc-400 hover:text-zinc-200">फ़ॉलोअर्स</span>
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              playClickSound();
+                              setFollowListModalMode('following');
+                            }}
+                            className="hover:opacity-80 active:scale-95 transition-transform cursor-pointer"
+                          >
+                            <span className="font-bold text-white">{displayedFollowingCount}</span>{' '}
+                            <span className="text-zinc-400 hover:text-zinc-200">फ़ॉलोइंग</span>
+                          </button>
                         </div>
-                        <button
-                          type="button"
-                          onClick={() => {
-                            playClickSound();
-                            setFollowListModalMode('followers');
-                          }}
-                          className="hover:opacity-80 active:scale-95 transition-transform cursor-pointer"
-                        >
-                          <span className="font-bold text-white">{displayedFollowersCount}</span>{' '}
-                          <span className="text-zinc-400 hover:text-zinc-200">फ़ॉलोअर्स</span>
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => {
-                            playClickSound();
-                            setFollowListModalMode('following');
-                          }}
-                          className="hover:opacity-80 active:scale-95 transition-transform cursor-pointer"
-                        >
-                          <span className="font-bold text-white">{displayedFollowingCount}</span>{' '}
-                          <span className="text-zinc-400 hover:text-zinc-200">फ़ॉलोइंग</span>
-                        </button>
-                      </div>
+                      )}
                     </div>
                   </div>
 
@@ -651,12 +837,18 @@ export const SearchModal: React.FC<SearchModalProps> = ({
                             handleToggleFollowWithCountSync(selectedUser.username);
                           }}
                           className={`flex-1 py-2 rounded-xl text-xs font-bold transition-all active:scale-95 ${
-                            isFollowingSelectedUser
-                              ? 'bg-zinc-800 border border-zinc-700 text-white hover:bg-zinc-700'
+                            isFollowingSelectedUser || hasSentRequestToSelectedUser
+                              ? 'bg-zinc-900 border border-zinc-700 text-white hover:bg-zinc-800'
                               : 'bg-[#00FF88] text-black hover:bg-[#00e57a]'
                           }`}
                         >
-                          {isFollowingSelectedUser ? 'फ़ॉलो कर रहे हैं' : 'फ़ॉलो करें'}
+                          {isFollowingSelectedUser
+                            ? 'फ़ॉलो कर रहे हैं'
+                            : hasSentRequestToSelectedUser
+                            ? 'रिक्वेस्ट भेजी गई'
+                            : isSelectedUserPrivate
+                            ? 'रिक्वेस्ट भेजें'
+                            : 'फ़ॉलो करें'}
                         </button>
                       )}
                       <button
@@ -684,62 +876,76 @@ export const SearchModal: React.FC<SearchModalProps> = ({
                   )}
                 </div>
 
-                {/* User's Real Firebase Reels Grid */}
+                {/* User's Real Firebase Reels Grid OR Private Account Gate */}
                 <div className="p-2.5">
-                  <div className="flex items-center gap-1.5 px-1 pb-2">
-                    <Film size={13} className="text-[#00FF88]" />
-                    <span className="text-xs font-bold text-zinc-200">रील्स</span>
-                  </div>
-
-                  {isLoadingUserReels ? (
-                    <div className="py-12 flex flex-col items-center justify-center gap-2 text-zinc-400">
-                      <Loader2 size={20} className="animate-spin text-[#00FF88]" />
-                      <span className="text-xs">रील्स लोड हो रही हैं...</span>
-                    </div>
-                  ) : selectedUserReels.length > 0 ? (
-                    <div className="grid grid-cols-3 gap-1.5">
-                      {selectedUserReels.map((reel) => {
-                        const thumb = getAdaptiveThumbnailUrl(reel.posterUrl || reel.videoUrl);
-                        return (
-                          <div
-                            key={reel.id}
-                            onClick={() => handleOpenReel(reel)}
-                            className="relative aspect-[3/4] bg-zinc-900 rounded-xl overflow-hidden cursor-pointer group border border-zinc-800/70 hover:border-[#00FF88]/60 transition-all"
-                          >
-                            {thumb && thumb !== reel.videoUrl ? (
-                              <img
-                                src={thumb}
-                                alt={reel.title}
-                                className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300"
-                              />
-                            ) : (
-                              <video
-                                src={reel.videoUrl}
-                                muted
-                                playsInline
-                                preload="metadata"
-                                className="w-full h-full object-cover"
-                              />
-                            )}
-                            <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-transparent to-black/20" />
-                            <div className="absolute top-1.5 right-1.5 w-5 h-5 rounded-full bg-black/60 flex items-center justify-center text-white">
-                              <Play size={9} className="fill-white ml-0.5" />
-                            </div>
-                            <div className="absolute bottom-1.5 left-1.5 flex items-center gap-1 text-[10px] font-bold text-white drop-shadow">
-                              <Eye size={10} />
-                              <span>{reel.views}</span>
-                            </div>
-                          </div>
-                        );
-                      })}
+                  {!canViewSelectedUserPrivateContent ? (
+                    <div className="py-14 px-5 flex flex-col items-center justify-center text-center bg-black/70 border border-zinc-800 rounded-2xl my-2">
+                      <div className="w-14 h-14 rounded-full bg-zinc-950 border border-zinc-800 flex items-center justify-center mb-3 text-white">
+                        <Lock size={24} />
+                      </div>
+                      <p className="text-sm font-extrabold text-white">यह अकाउंट प्राइवेट है</p>
+                      <p className="text-xs text-zinc-400 mt-1.5 leading-relaxed max-w-[240px]">
+                        इनकी रीलें और पोस्ट देखने के लिए फ़ॉलो रिक्वेस्ट भेजें।
+                      </p>
                     </div>
                   ) : (
-                    <div className="py-12 flex flex-col items-center justify-center text-center px-4">
-                      <div className="w-11 h-11 rounded-full bg-zinc-900 border border-zinc-800 flex items-center justify-center mb-2 text-zinc-500">
-                        <Film size={18} />
+                    <>
+                      <div className="flex items-center gap-1.5 px-1 pb-2">
+                        <Film size={13} className="text-[#00FF88]" />
+                        <span className="text-xs font-bold text-zinc-200">रील्स</span>
                       </div>
-                      <p className="text-xs font-semibold text-zinc-400">अभी कोई रील नहीं है</p>
-                    </div>
+
+                      {isLoadingUserReels ? (
+                        <div className="py-12 flex flex-col items-center justify-center gap-2 text-zinc-400">
+                          <Loader2 size={20} className="animate-spin text-[#00FF88]" />
+                          <span className="text-xs">रील्स लोड हो रही हैं...</span>
+                        </div>
+                      ) : selectedUserReels.length > 0 ? (
+                        <div className="grid grid-cols-3 gap-1.5">
+                          {selectedUserReels.map((reel) => {
+                            const thumb = getAdaptiveThumbnailUrl(reel.posterUrl || reel.videoUrl);
+                            return (
+                              <div
+                                key={reel.id}
+                                onClick={() => handleOpenReel(reel)}
+                                className="relative aspect-[3/4] bg-zinc-900 rounded-xl overflow-hidden cursor-pointer group border border-zinc-800/70 hover:border-[#00FF88]/60 transition-all"
+                              >
+                                {thumb && thumb !== reel.videoUrl ? (
+                                  <img
+                                    src={thumb}
+                                    alt={reel.title}
+                                    className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300"
+                                  />
+                                ) : (
+                                  <video
+                                    src={reel.videoUrl}
+                                    muted
+                                    playsInline
+                                    preload="metadata"
+                                    className="w-full h-full object-cover"
+                                  />
+                                )}
+                                <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-transparent to-black/20" />
+                                <div className="absolute top-1.5 right-1.5 w-5 h-5 rounded-full bg-black/60 flex items-center justify-center text-white">
+                                  <Play size={9} className="fill-white ml-0.5" />
+                                </div>
+                                <div className="absolute bottom-1.5 left-1.5 flex items-center gap-1 text-[10px] font-bold text-white drop-shadow">
+                                  <Eye size={10} />
+                                  <span>{reel.views}</span>
+                                </div>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      ) : (
+                        <div className="py-12 flex flex-col items-center justify-center text-center px-4">
+                          <div className="w-11 h-11 rounded-full bg-zinc-900 border border-zinc-800 flex items-center justify-center mb-2 text-zinc-500">
+                            <Film size={18} />
+                          </div>
+                          <p className="text-xs font-semibold text-zinc-400">अभी कोई रील नहीं है</p>
+                        </div>
+                      )}
+                    </>
                   )}
                 </div>
               </div>
@@ -806,7 +1012,7 @@ export const SearchModal: React.FC<SearchModalProps> = ({
                 mode={followListModalMode}
                 targetUid={selectedUser.uid}
                 targetUsername={selectedUser.username}
-                targetIsPrivate={Boolean(selectedUser.isPrivate)}
+                targetIsPrivate={isSelectedUserPrivate}
                 totalCount={
                   followListModalMode === 'followers'
                     ? displayedFollowersCount
@@ -815,6 +1021,7 @@ export const SearchModal: React.FC<SearchModalProps> = ({
                 currentUserProfile={currentUserProfile}
                 blockedUsernames={blockedUsernames}
                 blockedByUsernames={blockedByUsernames}
+                sentFollowRequestUsernames={sentFollowRequestUsernames}
                 onClose={() => setFollowListModalMode(null)}
                 onToggleFollow={handleToggleFollowWithCountSync}
                 onSelectUser={async (u: FollowListUser) => {

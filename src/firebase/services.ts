@@ -23,6 +23,7 @@ import { db, auth } from './config';
 import {
   ReelItem,
   ReelComment,
+  ReelCommentReply,
   StoryItem,
   StorySlide,
   UserProfile,
@@ -30,6 +31,7 @@ import {
   NotificationItem,
   BlockedUserEntry,
   FollowListUser,
+  FollowRequestItem,
   AppLanguage,
 } from '../types';
 
@@ -1199,13 +1201,20 @@ export async function getFollowListPageFromFirebase(params: {
   }
 
   try {
-    // Enforce privacy: others cannot view private user's followers/following lists
+    // Enforce privacy: non-followers cannot view private user's followers/following lists
     const profileSnap = await getDoc(doc(db, 'users', resolvedUid)).catch(() => null);
     const profileData = profileSnap?.exists()
       ? (profileSnap.data() as Partial<UserProfile>)
       : null;
     const isOwner = Boolean(viewerUid && viewerUid === resolvedUid);
-    if (profileData?.isPrivate && !isOwner) {
+    let isApprovedFollower = false;
+    if (profileData?.isPrivate && !isOwner && viewerUid && viewerUid !== 'guest_user') {
+      const followerSnap = await getDoc(
+        doc(db, 'users', resolvedUid, 'followers', viewerUid)
+      ).catch(() => null);
+      isApprovedFollower = Boolean(followerSnap?.exists());
+    }
+    if (profileData?.isPrivate && !isOwner && !isApprovedFollower) {
       return { users: [], lastDoc: null, hasMore: false, isPrivateRestricted: true };
     }
 
@@ -1476,7 +1485,7 @@ export async function saveReelCommentToFirebase(
 
   const cleanUser = (comment.user || 'user').trim().slice(0, 60) || 'user';
   const cleanAvatar = (comment.avatar || '').slice(0, 500);
-  const createdAt = Date.now();
+  const createdAt = typeof comment.createdAt === 'number' && comment.createdAt > 0 ? comment.createdAt : Date.now();
 
   try {
     const commentDocRef = doc(db, 'reels', reel.id, 'comments', comment.id);
@@ -1489,6 +1498,7 @@ export async function saveReelCommentToFirebase(
       text: cleanText,
       timeAgo: comment.timeAgo || 'Just now',
       likes: typeof comment.likes === 'number' ? Math.max(0, comment.likes) : 0,
+      repliesCount: typeof comment.repliesCount === 'number' ? Math.max(0, comment.repliesCount) : 0,
       createdAt,
     });
 
@@ -1510,43 +1520,106 @@ export async function saveReelCommentToFirebase(
   }
 }
 
-export async function getReelCommentsFromFirebase(reelId: string): Promise<ReelComment[]> {
-  if (!reelId) return [];
-  try {
-    const q = query(
-      collection(db, 'reels', reelId, 'comments'),
-      orderBy('createdAt', 'desc'),
-      limit(100)
-    );
-    const snap = await getDocs(q);
-    const comments: ReelComment[] = [];
-    snap.forEach((d) => {
-      const data = d.data();
-      comments.push({
-        id: (data.id as string) || d.id,
-        user: (data.user as string) || 'user',
-        avatar: (data.avatar as string) || '',
-        text: (data.text as string) || '',
-        timeAgo: formatCommentTimeAgo(data.createdAt as number | undefined, data.timeAgo as string | undefined),
-        likes: typeof data.likes === 'number' ? data.likes : 0,
-      });
-    });
+async function hydrateCommentsLikes(
+  reelId: string,
+  comments: ReelComment[],
+  viewerUid?: string
+): Promise<ReelComment[]> {
+  if (!viewerUid || viewerUid === 'guest_user' || comments.length === 0) {
     return comments;
+  }
+
+  const likedFlags = await Promise.all(
+    comments.map(async (c) => {
+      try {
+        const likeSnap = await getDoc(doc(db, 'reels', reelId, 'comments', c.id, 'likes', viewerUid));
+        return likeSnap.exists();
+      } catch {
+        return false;
+      }
+    })
+  );
+
+  return comments.map((c, idx) => ({
+    ...c,
+    isLiked: likedFlags[idx],
+  }));
+}
+
+function mapDocToReelComment(d: QueryDocumentSnapshot<DocumentData>, reelId: string): ReelComment {
+  const data = d.data();
+  const createdAt = typeof data.createdAt === 'number' ? data.createdAt : undefined;
+  return {
+    id: (data.id as string) || d.id,
+    reelId: (data.reelId as string) || reelId,
+    ...(typeof data.uid === 'string' && data.uid ? { uid: data.uid } : {}),
+    user: (data.user as string) || 'user',
+    avatar: (data.avatar as string) || '',
+    text: (data.text as string) || '',
+    timeAgo: formatCommentTimeAgo(createdAt, data.timeAgo as string | undefined),
+    likes: typeof data.likes === 'number' ? Math.max(0, data.likes) : 0,
+    repliesCount: typeof data.repliesCount === 'number' ? Math.max(0, data.repliesCount) : 0,
+    ...(createdAt !== undefined ? { createdAt } : {}),
+  };
+}
+
+export async function getReelCommentsPageFromFirebase(
+  reelId: string,
+  viewerUid?: string,
+  pageSize = 20,
+  cursor?: QueryDocumentSnapshot<DocumentData> | null
+): Promise<{
+  comments: ReelComment[];
+  lastDoc: QueryDocumentSnapshot<DocumentData> | null;
+  hasMore: boolean;
+}> {
+  if (!reelId) return { comments: [], lastDoc: null, hasMore: false };
+  try {
+    const q = cursor
+      ? query(
+          collection(db, 'reels', reelId, 'comments'),
+          orderBy('createdAt', 'desc'),
+          startAfter(cursor),
+          limit(pageSize)
+        )
+      : query(
+          collection(db, 'reels', reelId, 'comments'),
+          orderBy('createdAt', 'desc'),
+          limit(pageSize)
+        );
+    const snap = await getDocs(q);
+    const rawComments: ReelComment[] = snap.docs.map((d) => mapDocToReelComment(d, reelId));
+    const hydrated = await hydrateCommentsLikes(reelId, rawComments, viewerUid);
+    const lastDoc = snap.docs.length > 0 ? snap.docs[snap.docs.length - 1] : null;
+    return {
+      comments: hydrated,
+      lastDoc,
+      hasMore: snap.docs.length === pageSize,
+    };
   } catch (err) {
-    console.warn('Failed to fetch reel comments from Firebase:', err);
-    return [];
+    console.warn('Failed to fetch paginated reel comments from Firebase:', err);
+    return { comments: [], lastDoc: null, hasMore: false };
   }
 }
 
+export async function getReelCommentsFromFirebase(
+  reelId: string,
+  viewerUid?: string
+): Promise<ReelComment[]> {
+  const { comments } = await getReelCommentsPageFromFirebase(reelId, viewerUid, 20, null);
+  return comments;
+}
+
 export async function getAllReelsCommentsFromFirebase(
-  reelIds: string[]
+  reelIds: string[],
+  viewerUid?: string
 ): Promise<Record<string, ReelComment[]>> {
   const result: Record<string, ReelComment[]> = {};
   if (!reelIds.length) return result;
 
   await Promise.all(
     reelIds.map(async (reelId) => {
-      const fetched = await getReelCommentsFromFirebase(reelId);
+      const fetched = await getReelCommentsFromFirebase(reelId, viewerUid);
       if (fetched.length > 0) {
         result[reelId] = fetched;
       }
@@ -1558,36 +1631,303 @@ export async function getAllReelsCommentsFromFirebase(
 
 export function subscribeToReelComments(
   reelId: string,
-  onUpdate: (comments: ReelComment[]) => void
+  onUpdate: (comments: ReelComment[]) => void,
+  viewerUid?: string
 ): () => void {
   if (!reelId) return () => {};
   const q = query(
     collection(db, 'reels', reelId, 'comments'),
     orderBy('createdAt', 'desc'),
-    limit(100)
+    limit(20)
   );
 
   return onSnapshot(
     q,
-    (snap) => {
-      const comments: ReelComment[] = [];
-      snap.forEach((d) => {
-        const data = d.data();
-        comments.push({
-          id: (data.id as string) || d.id,
-          user: (data.user as string) || 'user',
-          avatar: (data.avatar as string) || '',
-          text: (data.text as string) || '',
-          timeAgo: formatCommentTimeAgo(data.createdAt as number | undefined, data.timeAgo as string | undefined),
-          likes: typeof data.likes === 'number' ? data.likes : 0,
-        });
-      });
-      onUpdate(comments);
+    async (snap) => {
+      const rawComments: ReelComment[] = snap.docs.map((d) => mapDocToReelComment(d, reelId));
+      const hydrated = await hydrateCommentsLikes(reelId, rawComments, viewerUid);
+      onUpdate(hydrated);
     },
     (err) => {
       console.warn('Realtime comments listener warning:', err);
     }
   );
+}
+
+async function ensureParentCommentDoc(reel: ReelItem, comment: ReelComment): Promise<void> {
+  const commentRef = doc(db, 'reels', reel.id, 'comments', comment.id);
+  const snap = await getDoc(commentRef);
+  if (snap.exists()) return;
+
+  const fallbackCreatedAt =
+    typeof comment.createdAt === 'number' && comment.createdAt > 0
+      ? comment.createdAt
+      : Date.now() - 86400000;
+
+  await setDoc(commentRef, {
+    id: comment.id,
+    reelId: reel.id,
+    uid: comment.uid || 'seed_creator',
+    user: (comment.user || 'user').trim().slice(0, 60) || 'user',
+    avatar: (comment.avatar || '').slice(0, 500),
+    text: (comment.text || '').trim().slice(0, 1000) || 'Comment',
+    timeAgo: (comment.timeAgo || '1h').slice(0, 50),
+    likes: typeof comment.likes === 'number' ? Math.max(0, comment.likes) : 0,
+    repliesCount: typeof comment.repliesCount === 'number' ? Math.max(0, comment.repliesCount) : 0,
+    createdAt: fallbackCreatedAt,
+  });
+}
+
+export async function toggleCommentLikeInFirebase(
+  reel: ReelItem,
+  comment: ReelComment,
+  uid: string,
+  nextIsLiked: boolean,
+  nextLikesCount: number
+): Promise<void> {
+  if (!uid || uid === 'guest_user' || !reel.id || !comment.id) return;
+
+  try {
+    await ensureParentCommentDoc(reel, comment);
+
+    const likeRef = doc(db, 'reels', reel.id, 'comments', comment.id, 'likes', uid);
+    if (nextIsLiked) {
+      await setDoc(likeRef, {
+        uid,
+        commentId: comment.id,
+        reelId: reel.id,
+        createdAt: Date.now(),
+      });
+    } else {
+      await deleteDoc(likeRef);
+    }
+
+    const commentRef = doc(db, 'reels', reel.id, 'comments', comment.id);
+    await updateDoc(commentRef, {
+      likes: Math.max(0, nextLikesCount),
+    });
+  } catch (err) {
+    console.warn('Failed to toggle comment like in Firebase:', err);
+  }
+}
+
+export async function getCommentRepliesFromFirebase(
+  reelId: string,
+  commentId: string,
+  viewerUid?: string
+): Promise<ReelCommentReply[]> {
+  if (!reelId || !commentId) return [];
+  try {
+    const q = query(
+      collection(db, 'reels', reelId, 'comments', commentId, 'replies'),
+      orderBy('createdAt', 'asc'),
+      limit(50)
+    );
+    const snap = await getDocs(q);
+    const rawReplies: ReelCommentReply[] = snap.docs.map((d) => {
+      const data = d.data();
+      const createdAt = typeof data.createdAt === 'number' ? data.createdAt : undefined;
+      return {
+        id: (data.id as string) || d.id,
+        commentId: (data.commentId as string) || commentId,
+        reelId: (data.reelId as string) || reelId,
+        ...(typeof data.uid === 'string' && data.uid ? { uid: data.uid } : {}),
+        user: (data.user as string) || 'user',
+        avatar: (data.avatar as string) || '',
+        text: (data.text as string) || '',
+        ...(typeof data.replyToUsername === 'string' && data.replyToUsername
+          ? { replyToUsername: data.replyToUsername }
+          : {}),
+        timeAgo: formatCommentTimeAgo(createdAt, data.timeAgo as string | undefined),
+        likes: typeof data.likes === 'number' ? Math.max(0, data.likes) : 0,
+        ...(createdAt !== undefined ? { createdAt } : {}),
+      };
+    });
+
+    if (!viewerUid || viewerUid === 'guest_user' || rawReplies.length === 0) {
+      return rawReplies;
+    }
+
+    const likedFlags = await Promise.all(
+      rawReplies.map(async (r) => {
+        try {
+          const likeSnap = await getDoc(
+            doc(db, 'reels', reelId, 'comments', commentId, 'replies', r.id, 'likes', viewerUid)
+          );
+          return likeSnap.exists();
+        } catch {
+          return false;
+        }
+      })
+    );
+
+    return rawReplies.map((r, idx) => ({
+      ...r,
+      isLiked: likedFlags[idx],
+    }));
+  } catch (err) {
+    console.warn('Failed to fetch comment replies from Firebase:', err);
+    return [];
+  }
+}
+
+export async function saveCommentReplyToFirebase(
+  reel: ReelItem,
+  parentComment: ReelComment,
+  reply: ReelCommentReply,
+  uid: string,
+  nextRepliesCount: number
+): Promise<void> {
+  if (!uid || uid === 'guest_user' || !reel.id || !parentComment.id || !reply.id) return;
+
+  const cleanText = reply.text.trim().slice(0, 1000);
+  if (!cleanText) return;
+
+  const cleanUser = (reply.user || 'user').trim().slice(0, 60) || 'user';
+  const cleanAvatar = (reply.avatar || '').slice(0, 500);
+  const createdAt = typeof reply.createdAt === 'number' && reply.createdAt > 0 ? reply.createdAt : Date.now();
+
+  try {
+    await ensureParentCommentDoc(reel, parentComment);
+
+    const replyRef = doc(db, 'reels', reel.id, 'comments', parentComment.id, 'replies', reply.id);
+    await setDoc(replyRef, {
+      id: reply.id,
+      reelId: reel.id,
+      commentId: parentComment.id,
+      uid,
+      user: cleanUser,
+      avatar: cleanAvatar,
+      text: cleanText,
+      ...(reply.replyToUsername ? { replyToUsername: reply.replyToUsername.slice(0, 60) } : {}),
+      timeAgo: reply.timeAgo || 'Just now',
+      likes: typeof reply.likes === 'number' ? Math.max(0, reply.likes) : 0,
+      createdAt,
+    });
+
+    const parentRef = doc(db, 'reels', reel.id, 'comments', parentComment.id);
+    await updateDoc(parentRef, {
+      repliesCount: Math.max(0, nextRepliesCount),
+    });
+  } catch (err) {
+    console.warn('Failed to save comment reply to Firebase:', err);
+  }
+}
+
+export async function toggleReplyLikeInFirebase(
+  reelId: string,
+  commentId: string,
+  reply: ReelCommentReply,
+  uid: string,
+  nextIsLiked: boolean,
+  nextLikesCount: number
+): Promise<void> {
+  if (!uid || uid === 'guest_user' || !reelId || !commentId || !reply.id) return;
+
+  try {
+    const likeRef = doc(
+      db,
+      'reels',
+      reelId,
+      'comments',
+      commentId,
+      'replies',
+      reply.id,
+      'likes',
+      uid
+    );
+
+    if (nextIsLiked) {
+      await setDoc(likeRef, {
+        uid,
+        replyId: reply.id,
+        commentId,
+        reelId,
+        createdAt: Date.now(),
+      });
+    } else {
+      await deleteDoc(likeRef);
+    }
+
+    const replyRef = doc(db, 'reels', reelId, 'comments', commentId, 'replies', reply.id);
+    await updateDoc(replyRef, {
+      likes: Math.max(0, nextLikesCount),
+    });
+  } catch (err) {
+    console.warn('Failed to toggle reply like in Firebase:', err);
+  }
+}
+
+export async function deleteReelCommentFromFirebase(
+  reelId: string,
+  commentId: string,
+  updatedCommentsCount?: string
+): Promise<void> {
+  if (!reelId || !commentId) return;
+
+  try {
+    // 1. Delete subcollection docs (likes & replies + reply likes)
+    const [commentLikesSnap, repliesSnap] = await Promise.all([
+      getDocs(collection(db, 'reels', reelId, 'comments', commentId, 'likes')),
+      getDocs(collection(db, 'reels', reelId, 'comments', commentId, 'replies')),
+    ]);
+
+    await Promise.all([
+      ...commentLikesSnap.docs.map((d) => deleteDoc(d.ref).catch(() => {})),
+      ...repliesSnap.docs.map(async (replyDoc) => {
+        try {
+          const replyLikesSnap = await getDocs(
+            collection(db, 'reels', reelId, 'comments', commentId, 'replies', replyDoc.id, 'likes')
+          );
+          await Promise.all(replyLikesSnap.docs.map((ld) => deleteDoc(ld.ref).catch(() => {})));
+        } catch {
+          // ignore
+        }
+        await deleteDoc(replyDoc.ref).catch(() => {});
+      }),
+    ]);
+
+    // 2. Delete the comment document itself
+    await deleteDoc(doc(db, 'reels', reelId, 'comments', commentId));
+
+    // 3. Update parent reel comment count if numeric
+    if (updatedCommentsCount !== undefined) {
+      try {
+        await updateDoc(doc(db, 'reels', reelId), {
+          comments: updatedCommentsCount,
+          updatedAt: Date.now(),
+        });
+      } catch {
+        // Reel doc may be a mock seed reel without a Firestore parent doc
+      }
+    }
+  } catch (err) {
+    console.warn('Failed to delete comment from Firebase:', err);
+  }
+}
+
+export async function deleteCommentReplyFromFirebase(
+  reelId: string,
+  commentId: string,
+  replyId: string,
+  nextRepliesCount: number
+): Promise<void> {
+  if (!reelId || !commentId || !replyId) return;
+
+  try {
+    const replyLikesSnap = await getDocs(
+      collection(db, 'reels', reelId, 'comments', commentId, 'replies', replyId, 'likes')
+    );
+    await Promise.all(replyLikesSnap.docs.map((d) => deleteDoc(d.ref).catch(() => {})));
+
+    await deleteDoc(doc(db, 'reels', reelId, 'comments', commentId, 'replies', replyId));
+
+    await updateDoc(doc(db, 'reels', reelId, 'comments', commentId), {
+      repliesCount: Math.max(0, nextRepliesCount),
+    });
+  } catch (err) {
+    console.warn('Failed to delete comment reply from Firebase:', err);
+  }
 }
 
 // ======================== REAL FIREBASE SEARCH ========================
@@ -2536,6 +2876,477 @@ export function subscribeToBlockedByUsers(
     unsubs.forEach((u) => u());
   };
 }
+
+// ======================== PRIVATE ACCOUNTS & FOLLOW REQUESTS ========================
+
+export function subscribeToPrivateUsernames(
+  onUpdate: (usernames: string[]) => void
+): () => void {
+  const q = query(collection(db, 'users'), where('isPrivate', '==', true));
+  return onSnapshot(
+    q,
+    (snap) => {
+      const set = new Set<string>();
+      snap.forEach((d) => {
+        const data = d.data() as Partial<UserProfile>;
+        if (!data || data.isGuest || data.uid === 'guest_user') return;
+        const uname = (data.username || '').trim();
+        if (uname) set.add(uname);
+      });
+      onUpdate(Array.from(set));
+    },
+    (err) => {
+      console.warn('Private usernames listener warning:', err);
+    }
+  );
+}
+
+export function subscribeToUserFollowing(
+  uid: string,
+  onUpdate: (usernames: string[]) => void
+): () => void {
+  if (!uid || uid === 'guest_user') {
+    onUpdate([]);
+    return () => {};
+  }
+
+  return onSnapshot(
+    collection(db, 'users', uid, 'following'),
+    (snap) => {
+      const list: string[] = [];
+      snap.forEach((d) => {
+        const data = d.data() as { username?: string };
+        const uname = (data?.username || d.id || '').trim();
+        if (uname) list.push(uname);
+      });
+      onUpdate(list);
+    },
+    (err) => {
+      console.warn('User following listener warning:', err);
+    }
+  );
+}
+
+export function subscribeToIncomingFollowRequests(
+  uid: string,
+  onUpdate: (requests: FollowRequestItem[]) => void
+): () => void {
+  if (!uid || uid === 'guest_user') {
+    onUpdate([]);
+    return () => {};
+  }
+
+  const q = query(
+    collection(db, 'users', uid, 'followRequests'),
+    orderBy('createdAt', 'desc'),
+    limit(100)
+  );
+
+  return onSnapshot(
+    q,
+    (snap) => {
+      const items: FollowRequestItem[] = [];
+      snap.forEach((d) => {
+        const data = d.data() as Partial<FollowRequestItem>;
+        const requesterUid = (data?.requesterUid || d.id || '').trim();
+        const requesterUsername = (data?.requesterUsername || '').trim();
+        if (!requesterUid || !requesterUsername) return;
+        items.push({
+          id: data?.id || d.id,
+          requesterUid,
+          requesterUsername,
+          requesterName: (data?.requesterName || '').trim() || requesterUsername,
+          requesterAvatar:
+            (data?.requesterAvatar || '').trim() ||
+            `https://api.dicebear.com/7.x/avataaars/svg?seed=${encodeURIComponent(
+              requesterUsername
+            )}`,
+          targetUid: data?.targetUid || uid,
+          targetUsername: data?.targetUsername || '',
+          createdAt: typeof data?.createdAt === 'number' ? data.createdAt : 0,
+        });
+      });
+      items.sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+      onUpdate(items);
+    },
+    (err) => {
+      console.warn('Incoming follow requests listener warning:', err);
+    }
+  );
+}
+
+export function subscribeToSentFollowRequests(
+  uid: string,
+  onUpdate: (targetUsernames: string[]) => void
+): () => void {
+  if (!uid || uid === 'guest_user') {
+    onUpdate([]);
+    return () => {};
+  }
+
+  return onSnapshot(
+    collection(db, 'users', uid, 'sentFollowRequests'),
+    (snap) => {
+      const set = new Set<string>();
+      snap.forEach((d) => {
+        const data = d.data() as { targetUsername?: string };
+        const uname = (data?.targetUsername || '').trim();
+        if (uname) set.add(uname);
+      });
+      onUpdate(Array.from(set));
+    },
+    (err) => {
+      console.warn('Sent follow requests listener warning:', err);
+    }
+  );
+}
+
+export async function sendFollowRequestInFirebase(
+  targetUsername: string,
+  requesterProfile: UserProfile
+): Promise<{ sent: boolean; autoFollowed?: boolean }> {
+  const requesterUid = requesterProfile.uid;
+  const cleanTargetUsername = (targetUsername || '').trim();
+  if (
+    !requesterUid ||
+    requesterProfile.isGuest ||
+    requesterUid === 'guest_user' ||
+    !cleanTargetUsername ||
+    cleanTargetUsername === requesterProfile.username
+  ) {
+    return { sent: false };
+  }
+
+  try {
+    const targetUid = await resolveRecipientUidByUsername(cleanTargetUsername);
+    if (!targetUid || targetUid === 'guest_user' || targetUid === requesterUid) {
+      return { sent: false };
+    }
+
+    const targetSnap = await getDoc(doc(db, 'users', targetUid)).catch(() => null);
+    const targetData = targetSnap?.exists()
+      ? (targetSnap.data() as Partial<UserProfile>)
+      : null;
+
+    // If the target account is actually public, follow immediately instead of sending request
+    if (targetData && !targetData.isPrivate) {
+      await toggleFollowUserInFirebase(cleanTargetUsername, requesterUid, true, requesterProfile);
+      return { sent: false, autoFollowed: true };
+    }
+
+    const now = Date.now();
+    const cleanRequesterUsername =
+      (requesterProfile.username || 'user').trim().slice(0, 60) || 'user';
+    const cleanRequesterName =
+      (requesterProfile.name || cleanRequesterUsername).trim().slice(0, 80) ||
+      cleanRequesterUsername;
+    const cleanRequesterAvatar = (requesterProfile.avatarUrl || '').trim().slice(0, 500);
+    const cleanTargetName = (targetData?.name || cleanTargetUsername).trim().slice(0, 80);
+    const cleanTargetAvatar = (targetData?.avatarUrl || '').trim().slice(0, 500);
+
+    await setDoc(doc(db, 'users', targetUid, 'followRequests', requesterUid), {
+      id: requesterUid,
+      requesterUid,
+      requesterUsername: cleanRequesterUsername,
+      ...(cleanRequesterName ? { requesterName: cleanRequesterName } : {}),
+      ...(cleanRequesterAvatar ? { requesterAvatar: cleanRequesterAvatar } : {}),
+      targetUid,
+      targetUsername: cleanTargetUsername.slice(0, 60),
+      createdAt: now,
+    });
+
+    await setDoc(doc(db, 'users', requesterUid, 'sentFollowRequests', targetUid), {
+      id: targetUid,
+      requesterUid,
+      targetUid,
+      targetUsername: cleanTargetUsername.slice(0, 60),
+      ...(cleanTargetName ? { targetName: cleanTargetName } : {}),
+      ...(cleanTargetAvatar ? { targetAvatar: cleanTargetAvatar } : {}),
+      createdAt: now,
+    });
+
+    return { sent: true };
+  } catch (err) {
+    console.warn('Failed to send follow request in Firebase:', err);
+    return { sent: false };
+  }
+}
+
+export async function cancelFollowRequestInFirebase(
+  targetUsername: string,
+  requesterUid: string
+): Promise<boolean> {
+  const cleanTargetUsername = (targetUsername || '').trim();
+  if (!requesterUid || requesterUid === 'guest_user' || !cleanTargetUsername) {
+    return false;
+  }
+
+  try {
+    const targetUid = await resolveRecipientUidByUsername(cleanTargetUsername);
+    if (targetUid && targetUid !== 'guest_user') {
+      await Promise.all([
+        deleteDoc(doc(db, 'users', targetUid, 'followRequests', requesterUid)).catch(() => {}),
+        deleteDoc(doc(db, 'users', requesterUid, 'sentFollowRequests', targetUid)).catch(() => {}),
+      ]);
+    }
+
+    // Fallback cleanup by targetUsername in sentFollowRequests
+    const sentSnap = await getDocs(
+      query(
+        collection(db, 'users', requesterUid, 'sentFollowRequests'),
+        where('targetUsername', '==', cleanTargetUsername)
+      )
+    ).catch(() => null);
+    if (sentSnap && !sentSnap.empty) {
+      await Promise.all(sentSnap.docs.map((d) => deleteDoc(d.ref).catch(() => {})));
+    }
+    return true;
+  } catch (err) {
+    console.warn('Failed to cancel follow request in Firebase:', err);
+    return false;
+  }
+}
+
+export async function acceptFollowRequestInFirebase(
+  ownerProfile: UserProfile,
+  request: FollowRequestItem
+): Promise<boolean> {
+  const ownerUid = ownerProfile.uid;
+  const ownerUsername = (ownerProfile.username || '').trim();
+  const requesterUid = (request.requesterUid || '').trim();
+  const requesterUsername = (request.requesterUsername || '').trim();
+
+  if (
+    !ownerUid ||
+    ownerProfile.isGuest ||
+    ownerUid === 'guest_user' ||
+    !ownerUsername ||
+    !requesterUid ||
+    requesterUid === 'guest_user' ||
+    !requesterUsername
+  ) {
+    return false;
+  }
+
+  const now = Date.now();
+  const cleanRequesterName =
+    (request.requesterName || requesterUsername).trim().slice(0, 80) || requesterUsername;
+  const cleanRequesterAvatar = (request.requesterAvatar || '').trim().slice(0, 500);
+  const cleanOwnerName = (ownerProfile.name || ownerUsername).trim().slice(0, 80) || ownerUsername;
+  const cleanOwnerAvatar = (ownerProfile.avatarUrl || '').trim().slice(0, 500);
+
+  try {
+    // 1. Add requester to owner's followers subcollection
+    await setDoc(doc(db, 'users', ownerUid, 'followers', requesterUid), {
+      uid: requesterUid,
+      username: requesterUsername.slice(0, 60),
+      ...(cleanRequesterName ? { name: cleanRequesterName } : {}),
+      ...(cleanRequesterAvatar ? { avatarUrl: cleanRequesterAvatar } : {}),
+      followedAt: now,
+    });
+
+    // 2. Add owner to requester's following subcollection (while followRequests/{requesterUid} still exists for rule validation)
+    await setDoc(doc(db, 'users', requesterUid, 'following', ownerUsername), {
+      username: ownerUsername.slice(0, 60),
+      uid: requesterUid,
+      targetUid: ownerUid.slice(0, 128),
+      ...(cleanOwnerName ? { name: cleanOwnerName } : {}),
+      ...(cleanOwnerAvatar ? { avatarUrl: cleanOwnerAvatar } : {}),
+      followedAt: now,
+    });
+
+    // 3. Delete incoming & outgoing request markers
+    await Promise.all([
+      deleteDoc(doc(db, 'users', ownerUid, 'followRequests', requesterUid)).catch(() => {}),
+      deleteDoc(doc(db, 'users', requesterUid, 'sentFollowRequests', ownerUid)).catch(() => {}),
+    ]);
+
+    // 4. Best-effort sync of requester's followingList array
+    try {
+      const reqUserRef = doc(db, 'users', requesterUid);
+      const reqSnap = await getDoc(reqUserRef);
+      if (reqSnap.exists()) {
+        const data = reqSnap.data() as Partial<UserProfile>;
+        if (data?.username) {
+          const list = Array.isArray(data.followingList) ? data.followingList : [];
+          if (!list.includes(ownerUsername)) {
+            const nextList = [...list, ownerUsername];
+            await setDoc(
+              reqUserRef,
+              {
+                username: data.username,
+                followingList: nextList,
+                following: nextList.length,
+                updatedAt: now,
+              },
+              { merge: true }
+            );
+          }
+        }
+      }
+    } catch {
+      // non-fatal; subcollection users/{requesterUid}/following is authoritative
+    }
+
+    return true;
+  } catch (err) {
+    console.warn('Failed to accept follow request in Firebase:', err);
+    return false;
+  }
+}
+
+export async function declineFollowRequestInFirebase(
+  ownerUid: string,
+  _ownerUsername: string,
+  requesterUid: string
+): Promise<boolean> {
+  if (!ownerUid || ownerUid === 'guest_user' || !requesterUid || requesterUid === 'guest_user') {
+    return false;
+  }
+
+  try {
+    await Promise.all([
+      deleteDoc(doc(db, 'users', ownerUid, 'followRequests', requesterUid)).catch(() => {}),
+      deleteDoc(doc(db, 'users', requesterUid, 'sentFollowRequests', ownerUid)).catch(() => {}),
+    ]);
+    return true;
+  } catch (err) {
+    console.warn('Failed to decline follow request in Firebase:', err);
+    return false;
+  }
+}
+
+export async function removeFollowerInFirebase(
+  ownerUid: string,
+  ownerUsername: string,
+  followerUid: string | undefined,
+  followerUsername: string
+): Promise<boolean> {
+  const cleanOwnerUsername = (ownerUsername || '').trim();
+  const cleanFollowerUsername = (followerUsername || '').trim();
+  if (!ownerUid || ownerUid === 'guest_user' || !cleanOwnerUsername || !cleanFollowerUsername) {
+    return false;
+  }
+
+  try {
+    let resolvedFollowerUid = (followerUid || '').trim();
+    if (!resolvedFollowerUid) {
+      resolvedFollowerUid = (await resolveRecipientUidByUsername(cleanFollowerUsername)) || '';
+    }
+
+    if (resolvedFollowerUid && resolvedFollowerUid !== 'guest_user') {
+      await deleteDoc(doc(db, 'users', ownerUid, 'followers', resolvedFollowerUid)).catch(
+        () => {}
+      );
+      await removeFollowingReferenceForUser(
+        resolvedFollowerUid,
+        cleanFollowerUsername,
+        cleanOwnerUsername
+      );
+    }
+
+    // Fallback: remove any follower doc matched by username in case doc ID differed
+    const byUsernameSnap = await getDocs(
+      query(
+        collection(db, 'users', ownerUid, 'followers'),
+        where('username', '==', cleanFollowerUsername)
+      )
+    ).catch(() => null);
+    if (byUsernameSnap && !byUsernameSnap.empty) {
+      await Promise.all(
+        byUsernameSnap.docs.map(async (d) => {
+          const data = d.data() as { uid?: string };
+          const docUid = (data?.uid || d.id || '').trim();
+          await deleteDoc(d.ref).catch(() => {});
+          if (docUid && docUid !== 'guest_user' && docUid !== resolvedFollowerUid) {
+            await removeFollowingReferenceForUser(
+              docUid,
+              cleanFollowerUsername,
+              cleanOwnerUsername
+            );
+          }
+        })
+      );
+    }
+
+    return true;
+  } catch (err) {
+    console.warn('Failed to remove follower in Firebase:', err);
+    return false;
+  }
+}
+
+export async function updateAccountPrivacyInFirebase(
+  profile: UserProfile,
+  nextIsPrivate: boolean
+): Promise<{ approvedCount: number }> {
+  const uid = profile.uid;
+  const cleanUsername = (profile.username || '').trim();
+  if (!uid || profile.isGuest || uid === 'guest_user' || !cleanUsername) {
+    return { approvedCount: 0 };
+  }
+
+  const now = Date.now();
+  try {
+    await setDoc(
+      doc(db, 'users', uid),
+      {
+        username: cleanUsername,
+        isPrivate: nextIsPrivate,
+        updatedAt: now,
+      },
+      { merge: true }
+    );
+    if (cleanUsername !== uid) {
+      await setDoc(
+        doc(db, 'users', cleanUsername),
+        {
+          username: cleanUsername,
+          isPrivate: nextIsPrivate,
+          updatedAt: now,
+        },
+        { merge: true }
+      );
+    }
+
+    let approvedCount = 0;
+    if (!nextIsPrivate) {
+      const reqSnap = await getDocs(collection(db, 'users', uid, 'followRequests')).catch(
+        () => null
+      );
+      if (reqSnap && !reqSnap.empty) {
+        const pendingRequests: FollowRequestItem[] = [];
+        reqSnap.forEach((d) => {
+          const data = d.data() as Partial<FollowRequestItem>;
+          const requesterUid = (data?.requesterUid || d.id || '').trim();
+          const requesterUsername = (data?.requesterUsername || '').trim();
+          if (!requesterUid || !requesterUsername) return;
+          pendingRequests.push({
+            id: data?.id || d.id,
+            requesterUid,
+            requesterUsername,
+            requesterName: (data?.requesterName || '').trim() || requesterUsername,
+            requesterAvatar: (data?.requesterAvatar || '').trim(),
+            targetUid: data?.targetUid || uid,
+            targetUsername: data?.targetUsername || cleanUsername,
+            createdAt: typeof data?.createdAt === 'number' ? data.createdAt : now,
+          });
+        });
+
+        for (const req of pendingRequests) {
+          const ok = await acceptFollowRequestInFirebase(profile, req);
+          if (ok) approvedCount += 1;
+        }
+      }
+    }
+
+    return { approvedCount };
+  } catch (err) {
+    console.warn('Failed to update account privacy in Firebase:', err);
+    return { approvedCount: 0 };
+  }
+}
+
 
 
 

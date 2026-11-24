@@ -33,7 +33,7 @@ service cloud.firestore {
       return isValidId(reelId)
         && isValidId(commentId)
         && data.keys().hasAll(['id', 'reelId', 'uid', 'user', 'text', 'createdAt'])
-        && data.keys().hasOnly(['id', 'reelId', 'uid', 'user', 'avatar', 'text', 'timeAgo', 'likes', 'createdAt'])
+        && data.keys().hasOnly(['id', 'reelId', 'uid', 'user', 'avatar', 'text', 'timeAgo', 'likes', 'repliesCount', 'createdAt'])
         && data.id == commentId
         && data.reelId == reelId
         && isValidString(data.uid, 1, 128)
@@ -44,6 +44,29 @@ service cloud.firestore {
         && data.createdAt is number
         && data.createdAt > 0
         && (!('avatar' in data) || (data.avatar is string && data.avatar.size() <= 500))
+        && (!('timeAgo' in data) || (data.timeAgo is string && data.timeAgo.size() <= 50))
+        && (!('likes' in data) || (data.likes is number && data.likes >= 0))
+        && (!('repliesCount' in data) || (data.repliesCount is number && data.repliesCount >= 0));
+    }
+
+    function isValidCommentReply(data, reelId, commentId, replyId) {
+      return isValidId(reelId)
+        && isValidId(commentId)
+        && isValidId(replyId)
+        && data.keys().hasAll(['id', 'reelId', 'commentId', 'uid', 'user', 'text', 'createdAt'])
+        && data.keys().hasOnly(['id', 'reelId', 'commentId', 'uid', 'user', 'avatar', 'text', 'replyToUsername', 'timeAgo', 'likes', 'createdAt'])
+        && data.id == replyId
+        && data.reelId == reelId
+        && data.commentId == commentId
+        && isValidString(data.uid, 1, 128)
+        && data.uid != 'guest_user'
+        && (request.auth == null || data.uid == request.auth.uid)
+        && isValidString(data.user, 1, 60)
+        && isValidString(data.text, 1, 1000)
+        && data.createdAt is number
+        && data.createdAt > 0
+        && (!('avatar' in data) || (data.avatar is string && data.avatar.size() <= 500))
+        && (!('replyToUsername' in data) || (data.replyToUsername is string && data.replyToUsername.size() <= 60))
         && (!('timeAgo' in data) || (data.timeAgo is string && data.timeAgo.size() <= 50))
         && (!('likes' in data) || (data.likes is number && data.likes >= 0));
     }
@@ -106,6 +129,45 @@ service cloud.firestore {
         && (!('blockedUid' in data) || (data.blockedUid is string && data.blockedUid.size() <= 128));
     }
 
+    function isValidFollowRequest(data, userId, requesterId) {
+      return isValidId(userId)
+        && isValidId(requesterId)
+        && userId != 'guest_user'
+        && requesterId != 'guest_user'
+        && userId != requesterId
+        && (request.auth == null || requesterId == request.auth.uid)
+        && data.keys().hasAll(['id', 'requesterUid', 'requesterUsername', 'targetUid', 'targetUsername', 'createdAt'])
+        && data.keys().hasOnly(['id', 'requesterUid', 'requesterUsername', 'requesterName', 'requesterAvatar', 'targetUid', 'targetUsername', 'createdAt'])
+        && data.id == requesterId
+        && data.requesterUid == requesterId
+        && data.targetUid == userId
+        && isValidString(data.requesterUsername, 1, 60)
+        && isValidString(data.targetUsername, 1, 60)
+        && data.createdAt is number
+        && data.createdAt > 0
+        && (!('requesterName' in data) || (data.requesterName is string && data.requesterName.size() <= 80))
+        && (!('requesterAvatar' in data) || (data.requesterAvatar is string && data.requesterAvatar.size() <= 500));
+    }
+
+    function isValidSentFollowRequest(data, userId, targetKey) {
+      return isValidId(userId)
+        && isValidId(targetKey)
+        && userId != 'guest_user'
+        && (request.auth == null || userId == request.auth.uid)
+        && data.keys().hasAll(['id', 'requesterUid', 'targetUid', 'targetUsername', 'createdAt'])
+        && data.keys().hasOnly(['id', 'requesterUid', 'targetUid', 'targetUsername', 'targetName', 'targetAvatar', 'createdAt'])
+        && data.id == targetKey
+        && data.requesterUid == userId
+        && isValidId(data.targetUid)
+        && data.targetUid != 'guest_user'
+        && data.targetUid != userId
+        && isValidString(data.targetUsername, 1, 60)
+        && data.createdAt is number
+        && data.createdAt > 0
+        && (!('targetName' in data) || (data.targetName is string && data.targetName.size() <= 80))
+        && (!('targetAvatar' in data) || (data.targetAvatar is string && data.targetAvatar.size() <= 500));
+    }
+
     // Reels collection
     match /reels/{reelId} {
       allow read: if true;
@@ -127,6 +189,8 @@ service cloud.firestore {
             && request.resource.data.isAutoHidden is bool)
           || (request.resource.data.diff(resource.data).affectedKeys().hasOnly(['isAccountHidden', 'updatedAt'])
             && request.resource.data.isAccountHidden is bool)
+          || (request.resource.data.diff(resource.data).affectedKeys().hasOnly(['comments', 'updatedAt'])
+            && request.resource.data.comments is string)
         )
       );
       allow delete: if isOwnerOfContent(resource.data);
@@ -135,11 +199,84 @@ service cloud.firestore {
       match /comments/{commentId} {
         allow read: if true;
         allow create: if isValidComment(request.resource.data, reelId, commentId);
-        allow update: if false;
+        allow update: if request.resource.data.diff(resource.data).affectedKeys().hasOnly(['likes', 'repliesCount'])
+          && request.resource.data.diff(resource.data).affectedKeys().size() >= 1
+          && (!('likes' in request.resource.data) || (request.resource.data.likes is number && request.resource.data.likes >= 0))
+          && (!('repliesCount' in request.resource.data) || (request.resource.data.repliesCount is number && request.resource.data.repliesCount >= 0));
         allow delete: if request.auth == null
           || resource.data.uid == request.auth.uid
           || (exists(/databases/$(database)/documents/reels/$(reelId))
               && isOwnerOfContent(get(/databases/$(database)/documents/reels/$(reelId)).data));
+
+        // Per-comment likes subcollection
+        match /likes/{userId} {
+          allow read: if isValidId(reelId) && isValidId(commentId) && isValidId(userId);
+          allow create, update: if isValidId(reelId)
+            && isValidId(commentId)
+            && isValidId(userId)
+            && userId != 'guest_user'
+            && (request.auth == null || userId == request.auth.uid)
+            && request.resource.data.keys().hasAll(['uid', 'commentId', 'reelId', 'createdAt'])
+            && request.resource.data.keys().hasOnly(['uid', 'commentId', 'reelId', 'createdAt'])
+            && request.resource.data.uid == userId
+            && request.resource.data.commentId == commentId
+            && request.resource.data.reelId == reelId
+            && request.resource.data.createdAt is number;
+          allow delete: if isValidId(reelId)
+            && isValidId(commentId)
+            && isValidId(userId)
+            && userId != 'guest_user'
+            && (request.auth == null
+                || userId == request.auth.uid
+                || (exists(/databases/$(database)/documents/reels/$(reelId)/comments/$(commentId))
+                    && get(/databases/$(database)/documents/reels/$(reelId)/comments/$(commentId)).data.uid == request.auth.uid)
+                || (exists(/databases/$(database)/documents/reels/$(reelId))
+                    && isOwnerOfContent(get(/databases/$(database)/documents/reels/$(reelId)).data)));
+        }
+
+        // Comment replies subcollection
+        match /replies/{replyId} {
+          allow read: if true;
+          allow create: if isValidCommentReply(request.resource.data, reelId, commentId, replyId);
+          allow update: if request.resource.data.diff(resource.data).affectedKeys().hasOnly(['likes'])
+            && request.resource.data.likes is number
+            && request.resource.data.likes >= 0;
+          allow delete: if request.auth == null
+            || resource.data.uid == request.auth.uid
+            || (exists(/databases/$(database)/documents/reels/$(reelId)/comments/$(commentId))
+                && get(/databases/$(database)/documents/reels/$(reelId)/comments/$(commentId)).data.uid == request.auth.uid)
+            || (exists(/databases/$(database)/documents/reels/$(reelId))
+                && isOwnerOfContent(get(/databases/$(database)/documents/reels/$(reelId)).data));
+
+          // Per-reply likes subcollection
+          match /likes/{userId} {
+            allow read: if isValidId(reelId) && isValidId(commentId) && isValidId(replyId) && isValidId(userId);
+            allow create, update: if isValidId(reelId)
+              && isValidId(commentId)
+              && isValidId(replyId)
+              && isValidId(userId)
+              && userId != 'guest_user'
+              && (request.auth == null || userId == request.auth.uid)
+              && request.resource.data.keys().hasAll(['uid', 'replyId', 'commentId', 'reelId', 'createdAt'])
+              && request.resource.data.keys().hasOnly(['uid', 'replyId', 'commentId', 'reelId', 'createdAt'])
+              && request.resource.data.uid == userId
+              && request.resource.data.replyId == replyId
+              && request.resource.data.commentId == commentId
+              && request.resource.data.reelId == reelId
+              && request.resource.data.createdAt is number;
+            allow delete: if isValidId(reelId)
+              && isValidId(commentId)
+              && isValidId(replyId)
+              && isValidId(userId)
+              && userId != 'guest_user'
+              && (request.auth == null
+                  || userId == request.auth.uid
+                  || (exists(/databases/$(database)/documents/reels/$(reelId)/comments/$(commentId)/replies/$(replyId))
+                      && get(/databases/$(database)/documents/reels/$(reelId)/comments/$(commentId)/replies/$(replyId)).data.uid == request.auth.uid)
+                  || (exists(/databases/$(database)/documents/reels/$(reelId))
+                      && isOwnerOfContent(get(/databases/$(database)/documents/reels/$(reelId)).data)));
+          }
+        }
       }
 
       // Reel likes subcollection
@@ -279,10 +416,14 @@ service cloud.firestore {
           && (request.auth == null
               || userId == request.auth.uid
               || !exists(/databases/$(database)/documents/users/$(userId))
-              || get(/databases/$(database)/documents/users/$(userId)).data.isPrivate != true);
+              || get(/databases/$(database)/documents/users/$(userId)).data.isPrivate != true
+              || exists(/databases/$(database)/documents/users/$(userId)/followers/$(request.auth.uid)));
         allow create, update: if isValidId(userId)
           && userId != 'guest_user'
-          && (request.auth == null || userId == request.auth.uid);
+          && (request.auth == null
+              || userId == request.auth.uid
+              || (exists(/databases/$(database)/documents/users/$(request.auth.uid)/followRequests/$(userId))
+                  && (!('targetUid' in request.resource.data) || request.resource.data.targetUid == request.auth.uid)));
         allow delete: if isValidId(userId)
           && userId != 'guest_user'
           && (request.auth == null
@@ -291,19 +432,20 @@ service cloud.firestore {
                   && get(/databases/$(database)/documents/users/$(request.auth.uid)).data.username == targetUsername));
       }
 
-      // Followers subcollection (users who follow this user, hidden from others when isPrivate == true)
+      // Followers subcollection (users who follow this user, hidden from non-followers when isPrivate == true)
       match /followers/{followerId} {
         allow read: if isValidId(userId)
           && userId != 'guest_user'
           && (request.auth == null
               || userId == request.auth.uid
               || !exists(/databases/$(database)/documents/users/$(userId))
-              || get(/databases/$(database)/documents/users/$(userId)).data.isPrivate != true);
+              || get(/databases/$(database)/documents/users/$(userId)).data.isPrivate != true
+              || exists(/databases/$(database)/documents/users/$(userId)/followers/$(request.auth.uid)));
         allow create, update: if isValidId(userId)
           && isValidId(followerId)
           && userId != 'guest_user'
           && followerId != 'guest_user'
-          && (request.auth == null || followerId == request.auth.uid)
+          && (request.auth == null || followerId == request.auth.uid || userId == request.auth.uid)
           && request.resource.data.keys().hasAll(['uid', 'username', 'followedAt'])
           && request.resource.data.keys().hasOnly(['uid', 'username', 'name', 'avatarUrl', 'followedAt'])
           && request.resource.data.uid == followerId
@@ -319,6 +461,46 @@ service cloud.firestore {
           && (request.auth == null
               || followerId == request.auth.uid
               || userId == request.auth.uid);
+      }
+
+      // Incoming follow requests for a private user
+      match /followRequests/{requesterId} {
+        allow get: if isValidId(userId)
+          && isValidId(requesterId)
+          && userId != 'guest_user'
+          && (request.auth == null
+              || userId == request.auth.uid
+              || requesterId == request.auth.uid);
+        allow list: if isValidId(userId)
+          && userId != 'guest_user'
+          && (request.auth == null || userId == request.auth.uid);
+        allow create, update: if isValidFollowRequest(request.resource.data, userId, requesterId);
+        allow delete: if isValidId(userId)
+          && isValidId(requesterId)
+          && userId != 'guest_user'
+          && (request.auth == null
+              || userId == request.auth.uid
+              || requesterId == request.auth.uid);
+      }
+
+      // Outgoing sent follow requests sent by a user
+      match /sentFollowRequests/{targetKey} {
+        allow get: if isValidId(userId)
+          && isValidId(targetKey)
+          && userId != 'guest_user'
+          && (request.auth == null
+              || userId == request.auth.uid
+              || (resource != null && resource.data.targetUid == request.auth.uid));
+        allow list: if isValidId(userId)
+          && userId != 'guest_user'
+          && (request.auth == null || userId == request.auth.uid);
+        allow create, update: if isValidSentFollowRequest(request.resource.data, userId, targetKey);
+        allow delete: if isValidId(userId)
+          && isValidId(targetKey)
+          && userId != 'guest_user'
+          && (request.auth == null
+              || userId == request.auth.uid
+              || (resource != null && resource.data.targetUid == request.auth.uid));
       }
 
       // Blocked users subcollection (per-user block list)

@@ -1,10 +1,31 @@
+export interface ReelCommentReply {
+  id: string;
+  commentId: string;
+  reelId: string;
+  uid?: string;
+  user: string;
+  avatar: string;
+  text: string;
+  replyToUsername?: string;
+  timeAgo: string;
+  likes: number;
+  createdAt?: number;
+  isLiked?: boolean;
+}
+
 export interface ReelComment {
   id: string;
+  reelId?: string;
+  uid?: string;
   user: string;
   avatar: string;
   text: string;
   timeAgo: string;
   likes: number;
+  repliesCount?: number;
+  createdAt?: number;
+  isLiked?: boolean;
+  replies?: ReelCommentReply[];
 }
 
 export interface ReelItem {
@@ -165,6 +186,17 @@ export interface FollowListUser {
   isBlueTick?: boolean;
   isPrivate?: boolean;
   followedAt?: number;
+}
+
+export interface FollowRequestItem {
+  id: string;
+  requesterUid: string;
+  requesterUsername: string;
+  requesterName: string;
+  requesterAvatar: string;
+  targetUid: string;
+  targetUsername: string;
+  createdAt: number;
 }
 
 export type ActiveTab = 'Home' | 'Search' | 'Create' | 'Reels' | 'Profile';

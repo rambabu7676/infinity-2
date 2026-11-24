@@ -18,7 +18,7 @@ import {
   PlusSquare
 } from 'lucide-react';
 import { INITIAL_REELS } from './data/mockReels';
-import { ActiveTab, AppLanguage, CreateMode, FeedType, ReelComment, ReelItem, StoryItem, StorySlide, UserProfile, NotificationItem, BlockedUserEntry, FollowListUser } from './types';
+import { ActiveTab, AppLanguage, CreateMode, FeedType, ReelComment, ReelItem, StoryItem, StorySlide, UserProfile, NotificationItem, BlockedUserEntry, FollowListUser, FollowRequestItem } from './types';
 import { useLanguage } from './i18n/LanguageContext';
 import { translations } from './i18n/translations';
 import { HomeFeedView } from './components/HomeFeedView';
@@ -60,6 +60,8 @@ import {
   saveReelCommentToFirebase,
   getAllReelsCommentsFromFirebase,
   subscribeToReelComments,
+  toggleCommentLikeInFirebase,
+  deleteReelCommentFromFirebase,
   getReelsByIdsFromFirebase,
   createUserNotificationInFirebase,
   subscribeToUserNotifications,
@@ -81,6 +83,16 @@ import {
   deleteReelAndAssociatedDataFromFirebase,
   updateUserPostsCountInFirebase,
   saveUserLanguageToFirebase,
+  subscribeToPrivateUsernames,
+  subscribeToUserFollowing,
+  subscribeToIncomingFollowRequests,
+  subscribeToSentFollowRequests,
+  sendFollowRequestInFirebase,
+  cancelFollowRequestInFirebase,
+  acceptFollowRequestInFirebase,
+  declineFollowRequestInFirebase,
+  removeFollowerInFirebase,
+  updateAccountPrivacyInFirebase,
 } from './firebase/services';
 import {
   subscribeToAuthState,
@@ -122,6 +134,10 @@ export default function App() {
   const [notifications, setNotifications] = useState<NotificationItem[]>([]);
   const [blockedUsers, setBlockedUsers] = useState<BlockedUserEntry[]>([]);
   const [blockedByUsernames, setBlockedByUsernames] = useState<string[]>([]);
+  const [privateUsernames, setPrivateUsernames] = useState<string[]>([]);
+  const [incomingFollowRequests, setIncomingFollowRequests] = useState<FollowRequestItem[]>([]);
+  const [sentFollowRequestUsernames, setSentFollowRequestUsernames] = useState<string[]>([]);
+  const [privacyUpdating, setPrivacyUpdating] = useState(false);
   const [searchVisible, setSearchVisible] = useState(false);
   const [searchInitialUser, setSearchInitialUser] = useState<UserProfile | null>(null);
   const [authModalOpen, setAuthModalOpen] = useState(false);
@@ -459,6 +475,96 @@ export default function App() {
     };
   }, [userProfile.uid, userProfile.username, userProfile.isGuest]);
 
+  // Subscribe globally to accounts marked private so non-followers never see their content
+  useEffect(() => {
+    const unsubscribe = subscribeToPrivateUsernames((usernames) => {
+      setPrivateUsernames(usernames);
+    });
+    return () => unsubscribe();
+  }, []);
+
+  // Real-time following list, incoming follow requests, and sent follow requests for logged-in user
+  useEffect(() => {
+    const uid = userProfile.uid;
+    if (!uid || userProfile.isGuest || uid === 'guest_user') {
+      setIncomingFollowRequests([]);
+      setSentFollowRequestUsernames([]);
+      return;
+    }
+
+    const unsubFollowing = subscribeToUserFollowing(uid, (followingUsernames) => {
+      const fSet = new Set(followingUsernames);
+      setUserProfile((prev) => {
+        if (prev.uid !== uid || prev.isGuest) return prev;
+        const prevList = prev.followingList || [];
+        const unchanged =
+          prevList.length === followingUsernames.length &&
+          prevList.every((u, idx) => u === followingUsernames[idx]);
+        if (unchanged) return prev;
+        return {
+          ...prev,
+          followingList: followingUsernames,
+          following: followingUsernames.length,
+        };
+      });
+
+      setReels((prev) =>
+        prev.map((r) => {
+          const nextFollowing = fSet.has(r.user);
+          return r.isFollowing === nextFollowing ? r : { ...r, isFollowing: nextFollowing };
+        })
+      );
+
+      setSelectedVideo((prev) => {
+        if (!prev) return null;
+        const nextFollowing = fSet.has(prev.user);
+        return prev.isFollowing === nextFollowing ? prev : { ...prev, isFollowing: nextFollowing };
+      });
+    });
+
+    const unsubIncoming = subscribeToIncomingFollowRequests(uid, (requests) => {
+      setIncomingFollowRequests(requests);
+    });
+
+    const unsubSent = subscribeToSentFollowRequests(uid, (usernames) => {
+      setSentFollowRequestUsernames(usernames);
+    });
+
+    return () => {
+      unsubFollowing();
+      unsubIncoming();
+      unsubSent();
+    };
+  }, [userProfile.uid, userProfile.isGuest]);
+
+  const privateUsernamesSet = React.useMemo(
+    () => new Set<string>(privateUsernames),
+    [privateUsernames]
+  );
+
+  const sentFollowRequestSet = React.useMemo(
+    () => new Set<string>(sentFollowRequestUsernames),
+    [sentFollowRequestUsernames]
+  );
+
+  const isPrivateRestrictedCreator = (creatorUsername: string): boolean => {
+    const clean = (creatorUsername || '').trim();
+    if (!clean) return false;
+    const isGuestNow = Boolean(
+      userProfile.isGuest || !userProfile.uid || userProfile.uid === 'guest_user'
+    );
+    if (!isGuestNow && userProfile.username === clean) {
+      return false;
+    }
+    if (!privateUsernamesSet.has(clean)) {
+      return false;
+    }
+    if (!isGuestNow && (userProfile.followingList || []).includes(clean)) {
+      return false;
+    }
+    return true;
+  };
+
   // Enforce mutual unfollow whenever block list changes (from either side)
   useEffect(() => {
     if (allBlockedUsernamesSet.size === 0) return;
@@ -586,8 +692,9 @@ export default function App() {
     let isCancelled = false;
 
     const loadAllComments = async () => {
+      const viewerUid = !userProfile.isGuest && userProfile.uid && userProfile.uid !== 'guest_user' ? userProfile.uid : undefined;
       const reelIds = reelsRef.current.map((r) => r.id);
-      const commentsByReel = await getAllReelsCommentsFromFirebase(reelIds);
+      const commentsByReel = await getAllReelsCommentsFromFirebase(reelIds, viewerUid);
       if (isCancelled || Object.keys(commentsByReel).length === 0) return;
 
       setReels((prev) =>
@@ -620,39 +727,44 @@ export default function App() {
     return () => {
       isCancelled = true;
     };
-  }, [reelsHydratedFromDb]);
+  }, [reelsHydratedFromDb, userProfile.uid, userProfile.isGuest]);
 
   // Subscribe to realtime comments while viewing a reel so other users' comments appear live
   useEffect(() => {
     const reelId = selectedVideo?.id;
     if (!reelId) return;
 
-    const unsubscribe = subscribeToReelComments(reelId, (dbComments) => {
-      setReels((prev) =>
-        prev.map((r) => {
-          if (r.id !== reelId) return r;
-          const merged = mergeCommentsList(dbComments, r.commentsList);
-          return {
-            ...r,
-            commentsList: merged,
-            comments: /^\d+$/.test(r.comments || '') ? String(merged.length) : r.comments,
-          };
-        })
-      );
+    const viewerUid = !userProfile.isGuest && userProfile.uid && userProfile.uid !== 'guest_user' ? userProfile.uid : undefined;
+    const unsubscribe = subscribeToReelComments(
+      reelId,
+      (dbComments) => {
+        setReels((prev) =>
+          prev.map((r) => {
+            if (r.id !== reelId) return r;
+            const merged = mergeCommentsList(dbComments, r.commentsList);
+            return {
+              ...r,
+              commentsList: merged,
+              comments: /^\d+$/.test(r.comments || '') ? String(merged.length) : r.comments,
+            };
+          })
+        );
 
-      setSelectedVideo((prev) => {
-        if (!prev || prev.id !== reelId) return prev;
-        const merged = mergeCommentsList(dbComments, prev.commentsList);
-        return {
-          ...prev,
-          commentsList: merged,
-          comments: /^\d+$/.test(prev.comments || '') ? String(merged.length) : prev.comments,
-        };
-      });
-    });
+        setSelectedVideo((prev) => {
+          if (!prev || prev.id !== reelId) return prev;
+          const merged = mergeCommentsList(dbComments, prev.commentsList);
+          return {
+            ...prev,
+            commentsList: merged,
+            comments: /^\d+$/.test(prev.comments || '') ? String(merged.length) : prev.comments,
+          };
+        });
+      },
+      viewerUid
+    );
 
     return () => unsubscribe();
-  }, [selectedVideo?.id]);
+  }, [selectedVideo?.id, userProfile.uid, userProfile.isGuest]);
 
   const showToast = (title: string, desc: string) => {
     setToastMessage({ title, desc });
@@ -734,6 +846,8 @@ export default function App() {
     setNotifications([]);
     setBlockedUsers([]);
     setBlockedByUsernames([]);
+    setIncomingFollowRequests([]);
+    setSentFollowRequestUsernames([]);
     setSeenStoriesMap({});
     setReels((prev) =>
       prev.map((r) => ({ ...r, isLiked: false, isDisliked: false, isSaved: false, isFollowing: false }))
@@ -857,8 +971,8 @@ export default function App() {
     void toggleSavedReelInFirebase(reelId, userProfile.uid, nextIsSaved);
   };
 
-  const handleToggleFollow = (username: string) => {
-    if (userProfile.isGuest || !userProfile.uid) {
+  const handleToggleFollow = async (username: string) => {
+    if (userProfile.isGuest || !userProfile.uid || userProfile.uid === 'guest_user') {
       showToast(t.toasts.followLoginTitle, t.toasts.followLoginDesc);
       return;
     }
@@ -871,6 +985,56 @@ export default function App() {
     const isCurrentlyFollowing = targetReel
       ? Boolean(targetReel.isFollowing)
       : (userProfile.followingList || []).includes(username);
+
+    // If not currently following and target account is private -> send or withdraw follow request
+    if (!isCurrentlyFollowing && privateUsernamesSet.has(username)) {
+      const alreadySent = sentFollowRequestSet.has(username);
+      if (alreadySent) {
+        setSentFollowRequestUsernames((prev) => prev.filter((u) => u !== username));
+        showToast('रिक्वेस्ट वापस ली गई', `@${username} की फ़ॉलो रिक्वेस्ट रद्द कर दी गई।`);
+        await cancelFollowRequestInFirebase(username, userProfile.uid);
+      } else {
+        setSentFollowRequestUsernames((prev) =>
+          prev.includes(username) ? prev : [...prev, username]
+        );
+        const result = await sendFollowRequestInFirebase(username, userProfile);
+        if (result.autoFollowed) {
+          setSentFollowRequestUsernames((prev) => prev.filter((u) => u !== username));
+          setReels((prev) =>
+            prev.map((r) => (r.user === username ? { ...r, isFollowing: true } : r))
+          );
+          if (selectedVideo && selectedVideo.user === username) {
+            setSelectedVideo((prev) => (prev ? { ...prev, isFollowing: true } : null));
+          }
+          setUserProfile((prev) => {
+            const currentList = prev.followingList || [];
+            const updatedList = currentList.includes(username)
+              ? currentList
+              : [...currentList, username];
+            return {
+              ...prev,
+              dailyFollows: Math.min(200, prev.dailyFollows + 1),
+              following: updatedList.length,
+              followingList: updatedList,
+            };
+          });
+          showToast(t.toasts.followTitle, t.toasts.followDesc(username));
+          if (username !== userProfile.username) {
+            void createUserNotificationInFirebase({
+              type: 'follow',
+              actor: userProfile,
+              targetUsername: username,
+            });
+          }
+        } else if (result.sent) {
+          showToast('रिक्वेस्ट भेजी गई', `@${username} को फ़ॉलो रिक्वेस्ट भेजी गई है।`);
+        } else {
+          setSentFollowRequestUsernames((prev) => prev.filter((u) => u !== username));
+        }
+      }
+      return;
+    }
+
     const willFollow = !isCurrentlyFollowing;
 
     setReels((prev) =>
@@ -931,9 +1095,17 @@ export default function App() {
       return;
     }
 
+    if (targetReel && isPrivateRestrictedCreator(targetReel.user)) {
+      showToast('यह अकाउंट प्राइवेट है', 'सिर्फ़ फ़ॉलोअर्स ही इस रील पर कमेंट कर सकते हैं।');
+      return;
+    }
+
     const commentAuthor = userProfile.username || userProfile.name || 'user';
+    const now = Date.now();
     const newComment: ReelComment = {
-      id: `${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+      id: `${now}_${Math.random().toString(36).slice(2, 7)}`,
+      reelId,
+      uid: userProfile.uid,
       user: commentAuthor,
       avatar:
         userProfile.avatarUrl ||
@@ -941,6 +1113,9 @@ export default function App() {
       text: cleanText,
       timeAgo: 'Just now',
       likes: 0,
+      repliesCount: 0,
+      createdAt: now,
+      isLiked: false,
     };
 
     const existingCount = targetReel?.commentsList?.length || 0;
@@ -989,6 +1164,101 @@ export default function App() {
     }
 
     showToast(t.toasts.commentPostedTitle, t.toasts.commentPostedDesc(selectedVideo?.user || 'reel'));
+  };
+
+  const handleToggleCommentLike = (reelId: string, comment: ReelComment) => {
+    if (userProfile.isGuest || !userProfile.uid || userProfile.uid === 'guest_user') {
+      showToast(t.common.loginRequiredTitle, t.toasts.commentLoginDesc);
+      return;
+    }
+
+    const targetReel =
+      reels.find((r) => r.id === reelId) ||
+      (selectedVideo?.id === reelId ? selectedVideo : undefined);
+    if (!targetReel) return;
+
+    const nextIsLiked = !comment.isLiked;
+    const nextLikesCount = Math.max(0, (comment.likes || 0) + (nextIsLiked ? 1 : -1));
+
+    const updateComments = (list: ReelComment[] = []) =>
+      list.map((c) =>
+        c.id === comment.id
+          ? { ...c, isLiked: nextIsLiked, likes: nextLikesCount }
+          : c
+      );
+
+    setReels((prev) =>
+      prev.map((r) => (r.id === reelId ? { ...r, commentsList: updateComments(r.commentsList) } : r))
+    );
+    setSelectedVideo((prev) =>
+      prev && prev.id === reelId ? { ...prev, commentsList: updateComments(prev.commentsList) } : prev
+    );
+
+    void toggleCommentLikeInFirebase(
+      targetReel,
+      comment,
+      userProfile.uid,
+      nextIsLiked,
+      nextLikesCount
+    );
+  };
+
+  const handleDeleteComment = (reelId: string, commentId: string) => {
+    if (userProfile.isGuest || !userProfile.uid || userProfile.uid === 'guest_user') {
+      showToast(t.common.loginRequiredTitle, t.toasts.commentLoginDesc);
+      return;
+    }
+
+    const targetReel =
+      reels.find((r) => r.id === reelId) ||
+      (selectedVideo?.id === reelId ? selectedVideo : undefined);
+
+    const nextCommentsStr =
+      targetReel && /^\d+$/.test(targetReel.comments || '')
+        ? String(Math.max(0, Number(targetReel.comments) - 1))
+        : undefined;
+
+    const filterList = (list: ReelComment[] = []) => list.filter((c) => c.id !== commentId);
+
+    setReels((prev) =>
+      prev.map((r) =>
+        r.id === reelId
+          ? {
+              ...r,
+              commentsList: filterList(r.commentsList),
+              ...(nextCommentsStr !== undefined ? { comments: nextCommentsStr } : {}),
+            }
+          : r
+      )
+    );
+    setSelectedVideo((prev) =>
+      prev && prev.id === reelId
+        ? {
+            ...prev,
+            commentsList: filterList(prev.commentsList),
+            ...(nextCommentsStr !== undefined ? { comments: nextCommentsStr } : {}),
+          }
+        : prev
+    );
+
+    void deleteReelCommentFromFirebase(reelId, commentId, nextCommentsStr);
+  };
+
+  const handleCommentRepliesCountChange = (
+    reelId: string,
+    commentId: string,
+    nextCount: number
+  ) => {
+    const safeCount = Math.max(0, nextCount);
+    const updateList = (list: ReelComment[] = []) =>
+      list.map((c) => (c.id === commentId ? { ...c, repliesCount: safeCount } : c));
+
+    setReels((prev) =>
+      prev.map((r) => (r.id === reelId ? { ...r, commentsList: updateList(r.commentsList) } : r))
+    );
+    setSelectedVideo((prev) =>
+      prev && prev.id === reelId ? { ...prev, commentsList: updateList(prev.commentsList) } : prev
+    );
   };
 
   // 👎 Dislike Reel
@@ -1217,6 +1487,7 @@ export default function App() {
         .filter((s) => {
           if (s.userId === myUid || s.id === myUid) return false;
           if (allBlockedUsernamesSet.has(s.username)) return false;
+          if (isPrivateRestrictedCreator(s.username)) return false;
           if (!followingSet.has(s.username)) return false;
           return filterActiveStorySlides(s.slides, storyNowTick).length > 0;
         })
@@ -1369,6 +1640,9 @@ export default function App() {
       return false;
     }
     if (allBlockedUsernamesSet.has(r.user)) {
+      return false;
+    }
+    if (isPrivateRestrictedCreator(r.user)) {
       return false;
     }
     if (feedType === 'ForYou') {
@@ -1680,6 +1954,8 @@ export default function App() {
     setNotifications([]);
     setBlockedUsers([]);
     setBlockedByUsernames([]);
+    setIncomingFollowRequests([]);
+    setSentFollowRequestUsernames([]);
     setSeenStoriesMap({});
     setDiamonds(0);
     setActiveTab('Home');
@@ -1799,6 +2075,83 @@ export default function App() {
     } catch (err) {
       console.warn('Failed to unblock user in Firebase:', err);
       showToast(t.common.error, t.toasts.unblockErrorDesc);
+    }
+  };
+
+  const handleTogglePrivacy = async () => {
+    if (isGuestUser || !userProfile.uid || userProfile.uid === 'guest_user' || privacyUpdating) {
+      return;
+    }
+    const nextIsPrivate = !userProfile.isPrivate;
+    const targetProfile = userProfile;
+    setPrivacyUpdating(true);
+
+    setUserProfile((prev) => ({ ...prev, isPrivate: nextIsPrivate }));
+    setPrivateUsernames((prev) => {
+      if (!targetProfile.username) return prev;
+      if (nextIsPrivate) {
+        return prev.includes(targetProfile.username) ? prev : [...prev, targetProfile.username];
+      }
+      return prev.filter((u) => u !== targetProfile.username);
+    });
+
+    try {
+      const { approvedCount } = await updateAccountPrivacyInFirebase(targetProfile, nextIsPrivate);
+      if (!nextIsPrivate) {
+        setIncomingFollowRequests([]);
+        showToast(
+          'अकाउंट पब्लिक हो गया',
+          approvedCount > 0
+            ? `सभी ${approvedCount} पेंडिंग फ़ॉलो रिक्वेस्ट अपने आप मंज़ूर हो गईं।`
+            : 'अब कोई भी आपकी प्रोफ़ाइल और रीलें देख सकता है।'
+        );
+      } else {
+        showToast(
+          'अकाउंट प्राइवेट हो गया',
+          'अब केवल आपके फ़ॉलोअर्स ही आपकी रीलें, पोस्ट और स्टोरी देख पाएँगे।'
+        );
+      }
+    } finally {
+      setPrivacyUpdating(false);
+    }
+  };
+
+  const handleAcceptFollowRequest = async (req: FollowRequestItem) => {
+    if (isGuestUser || !userProfile.uid || userProfile.uid === 'guest_user') return;
+    const ok = await acceptFollowRequestInFirebase(userProfile, req);
+    if (ok) {
+      setIncomingFollowRequests((prev) =>
+        prev.filter((r) => r.requesterUid !== req.requesterUid)
+      );
+      showToast('रिक्वेस्ट मंज़ूर हुई', `@${req.requesterUsername} अब आपके फ़ॉलोअर हैं।`);
+    }
+  };
+
+  const handleDeclineFollowRequest = async (req: FollowRequestItem) => {
+    if (isGuestUser || !userProfile.uid || userProfile.uid === 'guest_user') return;
+    const ok = await declineFollowRequestInFirebase(
+      userProfile.uid,
+      userProfile.username,
+      req.requesterUid
+    );
+    if (ok) {
+      setIncomingFollowRequests((prev) =>
+        prev.filter((r) => r.requesterUid !== req.requesterUid)
+      );
+      showToast('रिक्वेस्ट हटाई गई', `@${req.requesterUsername} की रिक्वेस्ट हटा दी गई।`);
+    }
+  };
+
+  const handleRemoveFollower = async (follower: FollowListUser) => {
+    if (isGuestUser || !userProfile.uid || userProfile.uid === 'guest_user') return;
+    const ok = await removeFollowerInFirebase(
+      userProfile.uid,
+      userProfile.username,
+      follower.uid,
+      follower.username
+    );
+    if (ok) {
+      showToast('फ़ॉलोअर हटाया गया', `@${follower.username} को आपके फ़ॉलोअर्स से हटा दिया गया है।`);
     }
   };
 
@@ -2127,7 +2480,9 @@ export default function App() {
                 onOpenStory={handleOpenStory}
                 onOpenStoryCreate={handleOpenStoryCreate}
                 onOpenSpin={() => setSpinModalVisible(true)}
-                unreadNotificationsCount={notifications.filter((n) => !n.read).length}
+                unreadNotificationsCount={
+                  notifications.filter((n) => !n.read).length + incomingFollowRequests.length
+                }
                 onOpenNotifications={() => {
                   setNotificationsVisible(true);
                   const uid = userProfile.uid;
@@ -2155,6 +2510,7 @@ export default function App() {
                     !r.isAutoHidden &&
                     (r.reportsCount || 0) < 7 &&
                     !allBlockedUsernamesSet.has(r.user) &&
+                    !isPrivateRestrictedCreator(r.user) &&
                     (!r.isAccountHidden || (!isGuestUser && r.user === userProfile.username))
                 )}
                 onSelectReel={(reel) => setSelectedVideo(reel)}
@@ -2201,6 +2557,8 @@ export default function App() {
                   onOpenSpin={() => setSpinModalVisible(true)}
                   blockedUsernames={blockedByMeUsernames}
                   blockedByUsernames={blockedByUsernames}
+                  sentFollowRequestUsernames={sentFollowRequestUsernames}
+                  onRemoveFollower={handleRemoveFollower}
                   onOpenUserProfile={async (targetUser: FollowListUser) => {
                     const fullProfile = await resolveFullUserProfileForNavigation(targetUser);
                     setSearchInitialUser(fullProfile);
@@ -2309,7 +2667,9 @@ export default function App() {
         {/* REEL VIEWER */}
         {selectedVideo && (
           <ReelViewerModal
-            reels={reels.filter((r) => !allBlockedUsernamesSet.has(r.user))}
+            reels={reels.filter(
+              (r) => !allBlockedUsernamesSet.has(r.user) && !isPrivateRestrictedCreator(r.user)
+            )}
             currentReel={selectedVideo}
             onClose={() => setSelectedVideo(null)}
             onOpenSpin={() => setSpinModalVisible(true)}
@@ -2317,6 +2677,9 @@ export default function App() {
             onToggleSave={handleToggleSave}
             onToggleFollow={handleToggleFollow}
             onAddComment={handleAddComment}
+            onToggleCommentLike={handleToggleCommentLike}
+            onDeleteComment={handleDeleteComment}
+            onCommentRepliesCountChange={handleCommentRepliesCountChange}
             onSelectReel={(r) => setSelectedVideo(r)}
             onReportReel={handleReportReel}
             onDislikeReel={handleDislikeReel}
@@ -2324,8 +2687,12 @@ export default function App() {
             onOpenAuth={() => setAuthModalOpen(true)}
             currentUsername={userProfile.username}
             currentUserUid={userProfile.uid}
+            currentUserAvatar={userProfile.avatarUrl}
             blockedUsernames={blockedByMeUsernames}
             blockedByUsernames={blockedByUsernames}
+            privateUsernames={privateUsernames}
+            followingList={userProfile.followingList || []}
+            sentFollowRequestUsernames={sentFollowRequestUsernames}
             onBlockUser={handleBlockUser}
             onEditReelCaption={handleEditReelCaption}
             onDeleteReel={handleDeleteReel}
@@ -2376,6 +2743,7 @@ export default function App() {
           onLogout={handleLogout}
           dailyFollows={userProfile.dailyFollows}
           isPrivate={userProfile.isPrivate}
+          privacyUpdating={privacyUpdating}
           userProfile={userProfile}
           goldenThemeEnabled={Boolean(userProfile.goldenThemeEnabled)}
           onToggleGoldenTheme={handleToggleGoldenTheme}
@@ -2384,18 +2752,17 @@ export default function App() {
           onCancelDeletion={handleCancelAccountDeletion}
           blockedUsers={blockedUsers}
           onUnblockUser={handleUnblockUser}
+          followRequests={incomingFollowRequests}
+          onAcceptFollowRequest={handleAcceptFollowRequest}
+          onDeclineFollowRequest={handleDeclineFollowRequest}
           onLanguageChange={handleChangeLanguage}
           onOpenAuth={() => {
             setSettingsVisible(false);
             setAuthModalOpen(true);
           }}
-          onTogglePrivacy={() =>
-            setUserProfile((prev) => {
-              const next = { ...prev, isPrivate: !prev.isPrivate };
-              saveUserProfileToFirebase(next);
-              return next;
-            })
-          }
+          onTogglePrivacy={() => {
+            void handleTogglePrivacy();
+          }}
         />
 
         {/* AUTHENTICATION MODAL */}
@@ -2440,6 +2807,9 @@ export default function App() {
           isOpen={notificationsVisible}
           onClose={() => setNotificationsVisible(false)}
           notifications={notifications}
+          followRequests={incomingFollowRequests}
+          onAcceptFollowRequest={handleAcceptFollowRequest}
+          onDeclineFollowRequest={handleDeclineFollowRequest}
         />
 
         {/* SEARCH & EXPLORE MODAL */}
@@ -2454,6 +2824,8 @@ export default function App() {
           onToggleFollow={handleToggleFollow}
           blockedUsernames={blockedByMeUsernames}
           blockedByUsernames={blockedByUsernames}
+          privateUsernames={privateUsernames}
+          sentFollowRequestUsernames={sentFollowRequestUsernames}
           onBlockUser={handleBlockUser}
           onSelectReel={(r) => {
             const existing = reels.find((item) => item.id === r.id);

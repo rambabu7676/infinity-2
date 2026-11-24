@@ -5,6 +5,7 @@ import {
   Share2,
   Bookmark,
   MoreHorizontal,
+  MoreVertical,
   Volume2,
   VolumeX,
   ChevronLeft,
@@ -26,13 +27,24 @@ import {
   Ban,
   Pencil,
   Trash2,
+  Lock,
+  Loader2,
+  CornerDownRight,
 } from 'lucide-react';
-import { ReelItem } from '../types';
+import { QueryDocumentSnapshot, DocumentData } from 'firebase/firestore';
+import { ReelItem, ReelComment, ReelCommentReply } from '../types';
 import { playClickSound, playLikePop } from '../utils/audio';
 import { ShareSheetModal } from './ShareSheetModal';
 import { sanitizeComment, VOICE_SUGGESTIONS } from '../utils/moderation';
 import { recordVerifiedReelView } from '../utils/monetization';
 import { useLanguage } from '../i18n/LanguageContext';
+import {
+  getReelCommentsPageFromFirebase,
+  getCommentRepliesFromFirebase,
+  saveCommentReplyToFirebase,
+  toggleReplyLikeInFirebase,
+  deleteCommentReplyFromFirebase,
+} from '../firebase/services';
 
 interface ReelViewerModalProps {
   reels: ReelItem[];
@@ -43,6 +55,9 @@ interface ReelViewerModalProps {
   onToggleSave: (reelId: string) => void;
   onToggleFollow: (username: string) => void;
   onAddComment: (reelId: string, commentText: string) => void;
+  onToggleCommentLike?: (reelId: string, comment: ReelComment) => void;
+  onDeleteComment?: (reelId: string, commentId: string) => void;
+  onCommentRepliesCountChange?: (reelId: string, commentId: string, nextCount: number) => void;
   onSelectReel: (reel: ReelItem) => void;
   onAddToStory?: (reel: ReelItem) => void;
   onReportReel?: (reelId: string, reason: string) => void;
@@ -51,8 +66,12 @@ interface ReelViewerModalProps {
   onOpenAuth?: () => void;
   currentUsername?: string;
   currentUserUid?: string;
+  currentUserAvatar?: string;
   blockedUsernames?: string[];
   blockedByUsernames?: string[];
+  privateUsernames?: string[];
+  followingList?: string[];
+  sentFollowRequestUsernames?: string[];
   onBlockUser?: (target: { username: string; avatarUrl?: string }) => Promise<void> | void;
   onEditReelCaption?: (reelId: string, newCaption: string) => Promise<{ success: boolean; error?: string }>;
   onDeleteReel?: (reelId: string) => Promise<{ success: boolean; error?: string }>;
@@ -67,6 +86,9 @@ export const ReelViewerModal: React.FC<ReelViewerModalProps> = ({
   onToggleSave,
   onToggleFollow,
   onAddComment,
+  onToggleCommentLike,
+  onDeleteComment,
+  onCommentRepliesCountChange,
   onSelectReel,
   onAddToStory,
   onReportReel,
@@ -75,8 +97,12 @@ export const ReelViewerModal: React.FC<ReelViewerModalProps> = ({
   onOpenAuth,
   currentUsername = '',
   currentUserUid = '',
+  currentUserAvatar = '',
   blockedUsernames = [],
   blockedByUsernames = [],
+  privateUsernames = [],
+  followingList = [],
+  sentFollowRequestUsernames = [],
   onBlockUser,
   onEditReelCaption,
   onDeleteReel,
@@ -114,8 +140,24 @@ export const ReelViewerModal: React.FC<ReelViewerModalProps> = ({
   const [isDeletingReel, setIsDeletingReel] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
 
-  // Comment input state
+  // Comment input, pagination, replies & delete menu states
   const [commentInput, setCommentInput] = useState('');
+  const commentInputRef = useRef<HTMLInputElement | null>(null);
+  const commentsListRef = useRef<HTMLDivElement | null>(null);
+  const [paginatedComments, setPaginatedComments] = useState<ReelComment[]>([]);
+  const lastCommentCursorRef = useRef<QueryDocumentSnapshot<DocumentData> | null>(null);
+  const [hasMoreComments, setHasMoreComments] = useState(false);
+  const [isLoadingComments, setIsLoadingComments] = useState(false);
+  const [isLoadingMoreComments, setIsLoadingMoreComments] = useState(false);
+  const [replyingTo, setReplyingTo] = useState<{
+    parentComment: ReelComment;
+    replyToUsername: string;
+  } | null>(null);
+  const [repliesByCommentId, setRepliesByCommentId] = useState<Record<string, ReelCommentReply[]>>({});
+  const [expandedReplies, setExpandedReplies] = useState<Record<string, boolean>>({});
+  const [loadingReplies, setLoadingReplies] = useState<Record<string, boolean>>({});
+  const [activeCommentMenuKey, setActiveCommentMenuKey] = useState<string | null>(null);
+  const longPressTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // 🎙️ Voice-to-Text States
   const [isVoiceTyping, setIsVoiceTyping] = useState(false);
@@ -225,9 +267,14 @@ export const ReelViewerModal: React.FC<ReelViewerModalProps> = ({
   // Touch swipe support (Up / Down)
   const touchStartY = useRef<number | null>(null);
   const handleTouchStart = (e: React.TouchEvent) => {
+    if (showCommentsDrawer || showShareModal) return;
     touchStartY.current = e.touches[0].clientY;
   };
   const handleTouchEnd = (e: React.TouchEvent) => {
+    if (showCommentsDrawer || showShareModal) {
+      touchStartY.current = null;
+      return;
+    }
     if (touchStartY.current === null) return;
     const touchEndY = e.changedTouches[0].clientY;
     const diff = touchStartY.current - touchEndY;
@@ -415,17 +462,108 @@ export const ReelViewerModal: React.FC<ReelViewerModalProps> = ({
   };
 
   const allBlockedSet = new Set<string>([...blockedUsernames, ...blockedByUsernames]);
+  const effectiveViewerUid =
+    !isGuest && currentUserUid && currentUserUid !== 'guest_user' ? currentUserUid : undefined;
+
+  // Load paginated 20 comments when opening comments drawer or changing reel/user
+  useEffect(() => {
+    if (!showCommentsDrawer || !currentReel?.id) {
+      setReplyingTo(null);
+      setActiveCommentMenuKey(null);
+      return;
+    }
+
+    let cancelled = false;
+    setPaginatedComments([]);
+    lastCommentCursorRef.current = null;
+    setHasMoreComments(false);
+    setRepliesByCommentId({});
+    setExpandedReplies({});
+    setLoadingReplies({});
+    setReplyingTo(null);
+    setActiveCommentMenuKey(null);
+    setIsLoadingComments(true);
+
+    getReelCommentsPageFromFirebase(currentReel.id, effectiveViewerUid, 20, null)
+      .then((res) => {
+        if (cancelled) return;
+        setPaginatedComments(res.comments);
+        lastCommentCursorRef.current = res.lastDoc;
+        setHasMoreComments(res.hasMore);
+      })
+      .finally(() => {
+        if (!cancelled) setIsLoadingComments(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [showCommentsDrawer, currentReel?.id, effectiveViewerUid]);
+
+  const handleLoadMoreComments = async () => {
+    if (
+      !currentReel?.id ||
+      isLoadingMoreComments ||
+      !hasMoreComments ||
+      !lastCommentCursorRef.current
+    ) {
+      return;
+    }
+    setIsLoadingMoreComments(true);
+    try {
+      const res = await getReelCommentsPageFromFirebase(
+        currentReel.id,
+        effectiveViewerUid,
+        20,
+        lastCommentCursorRef.current
+      );
+      setPaginatedComments((prev) => {
+        const existingIds = new Set(prev.map((c) => c.id));
+        const nextItems = res.comments.filter((c) => !existingIds.has(c.id));
+        return [...prev, ...nextItems];
+      });
+      lastCommentCursorRef.current = res.lastDoc;
+      setHasMoreComments(res.hasMore);
+    } finally {
+      setIsLoadingMoreComments(false);
+    }
+  };
+
+  const handleCommentsScroll = () => {
+    const el = commentsListRef.current;
+    if (!el) return;
+    if (el.scrollHeight - el.scrollTop - el.clientHeight < 90) {
+      void handleLoadMoreComments();
+    }
+  };
+
+  const showGuestCommentNotice = (msg: string) => {
+    setGuestAlert(msg);
+    setTimeout(() => setGuestAlert(null), 3500);
+  };
 
   const handleSendComment = (e?: React.FormEvent) => {
     if (e) e.preventDefault();
     if (!currentReel) return;
     if (isGuest) {
-      setGuestAlert(t.reelViewer.guestCommentAlert);
-      setTimeout(() => setGuestAlert(null), 3500);
+      showGuestCommentNotice(t.reelViewer.guestCommentAlert);
       return;
     }
     if (allBlockedSet.has(currentReel.user)) {
       setModerationNotice(t.reelViewer.blockedCommentNotice);
+      setTimeout(() => setModerationNotice(null), 3000);
+      return;
+    }
+    const isPrivateRestrictedNow = Boolean(
+      !isGuest &&
+        (currentReel.uid
+          ? currentUserUid !== currentReel.uid
+          : currentUsername !== currentReel.user) &&
+        privateUsernames.includes(currentReel.user) &&
+        !followingList.includes(currentReel.user)
+    );
+    if (isPrivateRestrictedNow) {
+      setModerationNotice('यह अकाउंट प्राइवेट है — सिर्फ़ फ़ॉलोअर्स कमेंट कर सकते हैं');
       setTimeout(() => setModerationNotice(null), 3000);
       return;
     }
@@ -440,11 +578,67 @@ export const ReelViewerModal: React.FC<ReelViewerModalProps> = ({
       setTimeout(() => setModerationNotice(null), 3000);
     }
 
+    if (replyingTo) {
+      const parent = replyingTo.parentComment;
+      const replyAuthor = currentUsername || 'user';
+      const now = Date.now();
+      const newReply: ReelCommentReply = {
+        id: `${now}_${Math.random().toString(36).slice(2, 7)}`,
+        commentId: parent.id,
+        reelId: currentReel.id,
+        uid: currentUserUid,
+        user: replyAuthor,
+        avatar:
+          currentUserAvatar ||
+          `https://api.dicebear.com/7.x/avataaars/svg?seed=${encodeURIComponent(replyAuthor)}`,
+        text: cleanedText,
+        ...(replyingTo.replyToUsername && replyingTo.replyToUsername !== parent.user
+          ? { replyToUsername: replyingTo.replyToUsername }
+          : {}),
+        timeAgo: 'Just now',
+        likes: 0,
+        createdAt: now,
+        isLiked: false,
+      };
+
+      const existingReplies = repliesByCommentId[parent.id] || [];
+      const nextReplies = [...existingReplies, newReply];
+      const nextRepliesCount = Math.max((parent.repliesCount || 0) + 1, nextReplies.length);
+
+      setRepliesByCommentId((prev) => ({
+        ...prev,
+        [parent.id]: nextReplies,
+      }));
+      setExpandedReplies((prev) => ({ ...prev, [parent.id]: true }));
+      setPaginatedComments((prev) =>
+        prev.map((c) => (c.id === parent.id ? { ...c, repliesCount: nextRepliesCount } : c))
+      );
+      onCommentRepliesCountChange?.(currentReel.id, parent.id, nextRepliesCount);
+
+      if (effectiveViewerUid) {
+        void saveCommentReplyToFirebase(
+          currentReel,
+          parent,
+          newReply,
+          effectiveViewerUid,
+          nextRepliesCount
+        );
+      }
+
+      setReplyingTo(null);
+      setCommentInput('');
+      setInterimText('');
+      stopVoiceTyping();
+      playClickSound();
+      return;
+    }
+
     onAddComment(currentReel.id, cleanedText);
     setCommentInput('');
     setInterimText('');
     stopVoiceTyping();
     playClickSound();
+    commentsListRef.current?.scrollTo({ top: 0, behavior: 'smooth' });
   };
 
   if (!currentReel) return null;
@@ -457,13 +651,221 @@ export const ReelViewerModal: React.FC<ReelViewerModalProps> = ({
         ? Boolean(currentUserUid && currentReel.uid === currentUserUid)
         : Boolean(currentUsername && currentReel.user === currentUsername))
   );
+  const isAuthorPrivate = privateUsernames.includes(currentReel.user);
+  const isFollowingAuthor = Boolean(
+    currentReel.isFollowing || followingList.includes(currentReel.user)
+  );
+  const hasSentRequestToAuthor = Boolean(
+    isAuthorPrivate &&
+      !isFollowingAuthor &&
+      sentFollowRequestUsernames.includes(currentReel.user)
+  );
+  const isAuthorPrivateRestricted = Boolean(
+    !isOwnReel && isAuthorPrivate && !isFollowingAuthor
+  );
   const isImageMedia = Boolean(
     currentReel.cloudinary?.resourceType === 'image' ||
       /\.(jpg|jpeg|png|webp|gif)(\?|$)/i.test(currentReel.videoUrl || '')
   );
-  const visibleComments = (currentReel.commentsList || []).filter(
-    (c) => !allBlockedSet.has(c.user)
-  );
+
+  const canDeleteAuthorItem = (itemUid?: string, itemUser?: string): boolean => {
+    if (isGuest) return false;
+    if (isOwnReel) return true;
+    if (itemUid && currentUserUid) return itemUid === currentUserUid;
+    if (!itemUid && currentUsername && itemUser) return itemUser === currentUsername;
+    return false;
+  };
+
+  const handleToggleCommentLike = (comment: ReelComment) => {
+    if (isGuest) {
+      showGuestCommentNotice(t.reelViewer.guestCommentLikeAlert);
+      return;
+    }
+    const nextIsLiked = !comment.isLiked;
+    const nextLikes = Math.max(0, (comment.likes || 0) + (nextIsLiked ? 1 : -1));
+    if (nextIsLiked) {
+      playLikePop();
+    } else {
+      playClickSound();
+    }
+    setPaginatedComments((prev) =>
+      prev.map((c) =>
+        c.id === comment.id ? { ...c, isLiked: nextIsLiked, likes: nextLikes } : c
+      )
+    );
+    onToggleCommentLike?.(currentReel.id, comment);
+  };
+
+  const handleStartReply = (parentComment: ReelComment, targetUsername?: string) => {
+    if (isGuest) {
+      showGuestCommentNotice(t.reelViewer.guestCommentReplyAlert);
+      return;
+    }
+    playClickSound();
+    setReplyingTo({
+      parentComment,
+      replyToUsername: targetUsername || parentComment.user,
+    });
+    setActiveCommentMenuKey(null);
+    setTimeout(() => commentInputRef.current?.focus(), 50);
+  };
+
+  const handleToggleViewReplies = async (comment: ReelComment) => {
+    const currentlyExpanded = Boolean(expandedReplies[comment.id]);
+    playClickSound();
+    if (currentlyExpanded) {
+      setExpandedReplies((prev) => ({ ...prev, [comment.id]: false }));
+      return;
+    }
+    setExpandedReplies((prev) => ({ ...prev, [comment.id]: true }));
+    if (repliesByCommentId[comment.id] === undefined) {
+      setLoadingReplies((prev) => ({ ...prev, [comment.id]: true }));
+      try {
+        const fetched = await getCommentRepliesFromFirebase(
+          currentReel.id,
+          comment.id,
+          effectiveViewerUid
+        );
+        setRepliesByCommentId((prev) => ({ ...prev, [comment.id]: fetched }));
+      } finally {
+        setLoadingReplies((prev) => ({ ...prev, [comment.id]: false }));
+      }
+    }
+  };
+
+  const handleDeleteTopComment = (comment: ReelComment) => {
+    if (isGuest) {
+      showGuestCommentNotice(t.reelViewer.guestCommentDeleteAlert);
+      return;
+    }
+    if (!canDeleteAuthorItem(comment.uid, comment.user)) return;
+    playClickSound();
+    setActiveCommentMenuKey(null);
+    setPaginatedComments((prev) => prev.filter((c) => c.id !== comment.id));
+    if (replyingTo?.parentComment.id === comment.id) {
+      setReplyingTo(null);
+    }
+    setModerationNotice(t.reelViewer.commentDeletedNotice);
+    setTimeout(() => setModerationNotice(null), 2200);
+    onDeleteComment?.(currentReel.id, comment.id);
+  };
+
+  const handleToggleReplyLike = (parentComment: ReelComment, reply: ReelCommentReply) => {
+    if (isGuest) {
+      showGuestCommentNotice(t.reelViewer.guestCommentLikeAlert);
+      return;
+    }
+    const nextIsLiked = !reply.isLiked;
+    const nextLikes = Math.max(0, (reply.likes || 0) + (nextIsLiked ? 1 : -1));
+    if (nextIsLiked) {
+      playLikePop();
+    } else {
+      playClickSound();
+    }
+
+    setRepliesByCommentId((prev) => ({
+      ...prev,
+      [parentComment.id]: (prev[parentComment.id] || []).map((r) =>
+        r.id === reply.id ? { ...r, isLiked: nextIsLiked, likes: nextLikes } : r
+      ),
+    }));
+
+    if (effectiveViewerUid) {
+      void toggleReplyLikeInFirebase(
+        currentReel.id,
+        parentComment.id,
+        reply,
+        effectiveViewerUid,
+        nextIsLiked,
+        nextLikes
+      );
+    }
+  };
+
+  const handleDeleteReply = (parentComment: ReelComment, reply: ReelCommentReply) => {
+    if (isGuest) {
+      showGuestCommentNotice(t.reelViewer.guestCommentDeleteAlert);
+      return;
+    }
+    if (!canDeleteAuthorItem(reply.uid, reply.user)) return;
+    playClickSound();
+    setActiveCommentMenuKey(null);
+
+    const remainingReplies = (repliesByCommentId[parentComment.id] || []).filter(
+      (r) => r.id !== reply.id
+    );
+    const nextRepliesCount = Math.max(
+      0,
+      Math.min(Math.max(0, (parentComment.repliesCount || 1) - 1), remainingReplies.length)
+    );
+
+    setRepliesByCommentId((prev) => ({
+      ...prev,
+      [parentComment.id]: remainingReplies,
+    }));
+    setPaginatedComments((prev) =>
+      prev.map((c) =>
+        c.id === parentComment.id ? { ...c, repliesCount: nextRepliesCount } : c
+      )
+    );
+    onCommentRepliesCountChange?.(currentReel.id, parentComment.id, nextRepliesCount);
+    setModerationNotice(t.reelViewer.commentDeletedNotice);
+    setTimeout(() => setModerationNotice(null), 2200);
+
+    void deleteCommentReplyFromFirebase(
+      currentReel.id,
+      parentComment.id,
+      reply.id,
+      nextRepliesCount
+    );
+  };
+
+  const cancelLongPress = () => {
+    if (longPressTimerRef.current) {
+      clearTimeout(longPressTimerRef.current);
+      longPressTimerRef.current = null;
+    }
+  };
+
+  const startLongPress = (menuKey: string, allowedToDelete: boolean) => {
+    cancelLongPress();
+    longPressTimerRef.current = setTimeout(() => {
+      longPressTimerRef.current = null;
+      if (isGuest) {
+        showGuestCommentNotice(t.reelViewer.guestCommentDeleteAlert);
+        return;
+      }
+      if (allowedToDelete) {
+        playClickSound();
+        setActiveCommentMenuKey((prev) => (prev === menuKey ? null : menuKey));
+      }
+    }, 500);
+  };
+
+  // Merge paginated Firestore batches with live currentReel.commentsList and sort newest-first with likes boost
+  const visibleComments = (() => {
+    const mergedMap = new Map<string, ReelComment>();
+    paginatedComments.forEach((c) => mergedMap.set(c.id, c));
+    (currentReel.commentsList || []).forEach((c) => {
+      const existing = mergedMap.get(c.id);
+      mergedMap.set(c.id, existing ? { ...existing, ...c } : c);
+    });
+
+    const LIKE_BOOST_MS = 15 * 60 * 1000; // Each like adds 15 min boost (capped at 500 likes)
+    const list = Array.from(mergedMap.values()).filter((c) => !allBlockedSet.has(c.user));
+
+    return list
+      .map((c, idx) => ({
+        c,
+        score:
+          (typeof c.createdAt === 'number' && c.createdAt > 0
+            ? c.createdAt
+            : Math.max(0, 1000000 - idx * 1000)) +
+          Math.min(Math.max(0, c.likes || 0), 500) * LIKE_BOOST_MS,
+      }))
+      .sort((a, b) => b.score - a.score)
+      .map((item) => item.c);
+  })();
 
   return (
     <div
@@ -753,21 +1155,29 @@ export const ReelViewerModal: React.FC<ReelViewerModalProps> = ({
               @{currentReel.user}
             </span>
 
-            {/* Follow / Following Button */}
-            <button
-              onClick={(e) => {
-                e.stopPropagation();
-                if (checkGuestRestricted(t.reelViewer.followAction)) return;
-                onToggleFollow(currentReel.user);
-              }}
-              className={`ml-1 px-3 py-1 text-xs font-semibold rounded-full border transition-all active:scale-95 shadow-sm ${
-                currentReel.isFollowing
-                  ? 'bg-zinc-800/80 border-zinc-700 text-zinc-300'
-                  : 'bg-[#00FF88] border-[#00FF88] text-black font-bold hover:bg-[#00e57a]'
-              }`}
-            >
-              {currentReel.isFollowing ? t.reelViewer.followingBtn : t.reelViewer.followBtn}
-            </button>
+            {/* Follow / Following / Follow Request Button */}
+            {!isOwnReel && (
+              <button
+                onClick={(e) => {
+                  e.stopPropagation();
+                  if (checkGuestRestricted(t.reelViewer.followAction)) return;
+                  onToggleFollow(currentReel.user);
+                }}
+                className={`ml-1 px-3 py-1 text-xs font-semibold rounded-full border transition-all active:scale-95 shadow-sm ${
+                  isFollowingAuthor || hasSentRequestToAuthor
+                    ? 'bg-zinc-800/80 border-zinc-700 text-zinc-200'
+                    : 'bg-[#00FF88] border-[#00FF88] text-black font-bold hover:bg-[#00e57a]'
+                }`}
+              >
+                {isFollowingAuthor
+                  ? t.reelViewer.followingBtn
+                  : hasSentRequestToAuthor
+                  ? 'रिक्वेस्ट भेजी गई'
+                  : isAuthorPrivate
+                  ? 'रिक्वेस्ट भेजें'
+                  : t.reelViewer.followBtn}
+              </button>
+            )}
           </div>
 
           {/* Caption & Hashtags clearly visible */}
@@ -787,12 +1197,16 @@ export const ReelViewerModal: React.FC<ReelViewerModalProps> = ({
         {/* ================= 5. SLIDE-UP COMMENTS DRAWER ================= */}
         {showCommentsDrawer && (
           <div className="absolute inset-0 z-40 bg-black/80 backdrop-blur-md flex flex-col justify-end animate-slideUp">
-            <div className="h-[72%] bg-[#14181B] border-t border-zinc-800 rounded-t-2xl flex flex-col p-4 shadow-2xl">
+            <div className="h-[74%] bg-[#14181B] border-t border-zinc-800 rounded-t-2xl flex flex-col p-4 shadow-2xl">
               {/* Drawer Header */}
               <div className="flex items-center justify-between pb-3 border-b border-zinc-800">
                 <div className="flex items-center gap-2">
                   <span className="text-sm font-bold text-white">
-                    {t.reelViewer.commentsHeader(visibleComments.length)}
+                    {t.reelViewer.commentsHeader(
+                      /^\d+$/.test(currentReel.comments || '')
+                        ? Math.max(visibleComments.length, Number(currentReel.comments))
+                        : visibleComments.length
+                    )}
                   </span>
                   <span className="text-[10px] text-zinc-400 bg-zinc-800 px-2 py-0.5 rounded-full flex items-center gap-1">
                     <ShieldCheck size={11} className="text-[#00FF88]" />
@@ -802,6 +1216,8 @@ export const ReelViewerModal: React.FC<ReelViewerModalProps> = ({
                 <button
                   onClick={() => {
                     stopVoiceTyping();
+                    setReplyingTo(null);
+                    setActiveCommentMenuKey(null);
                     setShowCommentsDrawer(false);
                   }}
                   className="text-zinc-400 hover:text-white p-1 rounded-full"
@@ -818,29 +1234,283 @@ export const ReelViewerModal: React.FC<ReelViewerModalProps> = ({
                 </div>
               )}
 
-              {/* Comments List */}
-              <div className="flex-1 overflow-y-auto py-3 space-y-3">
-                {visibleComments.length > 0 ? (
-                  visibleComments.map((c) => (
-                    <div key={c.id} className="flex items-start gap-2.5 text-xs">
-                      <img
-                        src={c.avatar}
-                        alt={c.user}
-                        className="w-7 h-7 rounded-full object-cover shrink-0 mt-0.5 ring-1 ring-zinc-700"
-                      />
-                      <div className="flex-1 min-w-0">
-                        <div className="flex items-center gap-2">
-                          <span className="font-bold text-white truncate">@{c.user}</span>
-                          <span className="text-[10px] text-zinc-500 shrink-0">{c.timeAgo}</span>
+              {/* Comments List (20-per-page infinite scroll) */}
+              <div
+                ref={commentsListRef}
+                onScroll={handleCommentsScroll}
+                className="flex-1 overflow-y-auto py-3 space-y-3.5"
+              >
+                {isLoadingComments && visibleComments.length === 0 ? (
+                  <div className="flex flex-col items-center justify-center py-10 gap-2 text-zinc-400">
+                    <Loader2 size={20} className="animate-spin text-[#00FF88]" />
+                    <span className="text-xs">{t.reelViewer.loadingComments}</span>
+                  </div>
+                ) : visibleComments.length > 0 ? (
+                  <>
+                    {visibleComments.map((c) => {
+                      const canDeleteThisComment = canDeleteAuthorItem(c.uid, c.user);
+                      const commentMenuKey = `comment:${c.id}`;
+                      const isCommentMenuOpen = activeCommentMenuKey === commentMenuKey;
+                      const loadedReplies = repliesByCommentId[c.id];
+                      const replyCount = Math.max(
+                        c.repliesCount || 0,
+                        loadedReplies ? loadedReplies.length : 0
+                      );
+                      const isRepliesExpanded = Boolean(expandedReplies[c.id]);
+                      const isRepliesLoading = Boolean(loadingReplies[c.id]);
+
+                      return (
+                        <div key={c.id} className="space-y-2">
+                          <div
+                            onTouchStart={() => startLongPress(commentMenuKey, canDeleteThisComment)}
+                            onTouchMove={cancelLongPress}
+                            onTouchEnd={cancelLongPress}
+                            onMouseDown={() => startLongPress(commentMenuKey, canDeleteThisComment)}
+                            onMouseUp={cancelLongPress}
+                            onMouseLeave={cancelLongPress}
+                            className="flex items-start gap-2.5 text-xs group rounded-xl p-1 -mx-1 transition-colors hover:bg-zinc-900/50"
+                          >
+                            <img
+                              src={
+                                c.avatar ||
+                                `https://api.dicebear.com/7.x/avataaars/svg?seed=${encodeURIComponent(c.user)}`
+                              }
+                              alt={c.user}
+                              className="w-7 h-7 rounded-full object-cover shrink-0 mt-0.5 ring-1 ring-zinc-700"
+                            />
+                            <div className="flex-1 min-w-0">
+                              <div className="flex items-center gap-2">
+                                <span className="font-bold text-white truncate">@{c.user}</span>
+                                <span className="text-[10px] text-zinc-500 shrink-0">{c.timeAgo}</span>
+                              </div>
+                              <p className="text-zinc-200 mt-0.5 leading-snug break-words">{c.text}</p>
+
+                              {/* Action row under comment: Reply + View/Hide Replies + Delete chip (when menu open) */}
+                              <div className="flex items-center flex-wrap gap-3 mt-1.5">
+                                <button
+                                  type="button"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    handleStartReply(c);
+                                  }}
+                                  className="text-[11px] font-semibold text-zinc-400 hover:text-[#00FF88] transition-colors"
+                                >
+                                  {t.reelViewer.replyBtn}
+                                </button>
+
+                                {replyCount > 0 && (
+                                  <button
+                                    type="button"
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      void handleToggleViewReplies(c);
+                                    }}
+                                    className="text-[11px] font-semibold text-zinc-400 hover:text-white flex items-center gap-1 transition-colors"
+                                  >
+                                    <CornerDownRight size={11} className="text-zinc-500" />
+                                    <span>
+                                      {isRepliesExpanded
+                                        ? t.reelViewer.hideRepliesBtn
+                                        : t.reelViewer.viewRepliesBtn(replyCount)}
+                                    </span>
+                                  </button>
+                                )}
+
+                                {canDeleteThisComment && isCommentMenuOpen && (
+                                  <button
+                                    type="button"
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      handleDeleteTopComment(c);
+                                    }}
+                                    className="px-2 py-0.5 rounded-md bg-rose-500/15 border border-rose-500/40 text-rose-400 hover:bg-rose-500/25 text-[11px] font-semibold flex items-center gap-1 animate-fadeIn"
+                                  >
+                                    <Trash2 size={11} />
+                                    <span>{t.reelViewer.deleteCommentBtn}</span>
+                                  </button>
+                                )}
+                              </div>
+                            </div>
+
+                            {/* Right side: Heart like button + Three-dots delete menu */}
+                            <div className="flex items-start gap-1.5 shrink-0">
+                              <button
+                                type="button"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  handleToggleCommentLike(c);
+                                }}
+                                className="flex flex-col items-center text-zinc-400 hover:text-white px-1 py-0.5 active:scale-110 transition-transform"
+                                aria-label={t.reelViewer.likeBtnTitle}
+                              >
+                                <Heart
+                                  size={14}
+                                  className={`transition-colors ${
+                                    c.isLiked
+                                      ? 'fill-[#FF0050] text-[#FF0050]'
+                                      : 'text-zinc-400 hover:text-rose-400'
+                                  }`}
+                                />
+                                <span className={`text-[10px] mt-0.5 ${c.isLiked ? 'text-[#FF0050] font-semibold' : 'text-zinc-500'}`}>
+                                  {c.likes || 0}
+                                </span>
+                              </button>
+
+                              {canDeleteThisComment && (
+                                <button
+                                  type="button"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    playClickSound();
+                                    setActiveCommentMenuKey((prev) =>
+                                      prev === commentMenuKey ? null : commentMenuKey
+                                    );
+                                  }}
+                                  className="p-1 text-zinc-500 hover:text-white rounded-full transition-colors"
+                                  aria-label={t.reelViewer.moreBtnTitle}
+                                >
+                                  <MoreVertical size={13} />
+                                </button>
+                              )}
+                            </div>
+                          </div>
+
+                          {/* Indented Nested Replies */}
+                          {isRepliesExpanded && (
+                            <div className="ml-8 pl-3 border-l border-zinc-800 space-y-2.5 animate-fadeIn">
+                              {isRepliesLoading ? (
+                                <div className="flex items-center gap-2 py-1 text-[11px] text-zinc-500">
+                                  <Loader2 size={12} className="animate-spin text-[#00FF88]" />
+                                  <span>{t.reelViewer.loadingComments}</span>
+                                </div>
+                              ) : (
+                                (loadedReplies || [])
+                                  .filter((r) => !allBlockedSet.has(r.user))
+                                  .map((r) => {
+                                    const canDeleteThisReply = canDeleteAuthorItem(r.uid, r.user);
+                                    const replyMenuKey = `reply:${r.id}`;
+                                    const isReplyMenuOpen = activeCommentMenuKey === replyMenuKey;
+
+                                    return (
+                                      <div
+                                        key={r.id}
+                                        onTouchStart={() => startLongPress(replyMenuKey, canDeleteThisReply)}
+                                        onTouchMove={cancelLongPress}
+                                        onTouchEnd={cancelLongPress}
+                                        onMouseDown={() => startLongPress(replyMenuKey, canDeleteThisReply)}
+                                        onMouseUp={cancelLongPress}
+                                        onMouseLeave={cancelLongPress}
+                                        className="flex items-start gap-2 text-xs rounded-lg p-1 -mx-1 hover:bg-zinc-900/40"
+                                      >
+                                        <img
+                                          src={
+                                            r.avatar ||
+                                            `https://api.dicebear.com/7.x/avataaars/svg?seed=${encodeURIComponent(r.user)}`
+                                          }
+                                          alt={r.user}
+                                          className="w-6 h-6 rounded-full object-cover shrink-0 mt-0.5 ring-1 ring-zinc-700"
+                                        />
+                                        <div className="flex-1 min-w-0">
+                                          <div className="flex items-center gap-1.5">
+                                            <span className="font-bold text-white truncate text-[11px]">
+                                              @{r.user}
+                                            </span>
+                                            <span className="text-[10px] text-zinc-500 shrink-0">
+                                              {r.timeAgo}
+                                            </span>
+                                          </div>
+                                          <p className="text-zinc-300 mt-0.5 leading-snug break-words text-[11px]">
+                                            {r.replyToUsername && (
+                                              <span className="text-[#00FF88] font-medium mr-1">
+                                                @{r.replyToUsername}
+                                              </span>
+                                            )}
+                                            {r.text}
+                                          </p>
+                                          <div className="flex items-center gap-3 mt-1">
+                                            <button
+                                              type="button"
+                                              onClick={(e) => {
+                                                e.stopPropagation();
+                                                handleStartReply(c, r.user);
+                                              }}
+                                              className="text-[10px] font-semibold text-zinc-400 hover:text-[#00FF88]"
+                                            >
+                                              {t.reelViewer.replyBtn}
+                                            </button>
+
+                                            {canDeleteThisReply && isReplyMenuOpen && (
+                                              <button
+                                                type="button"
+                                                onClick={(e) => {
+                                                  e.stopPropagation();
+                                                  handleDeleteReply(c, r);
+                                                }}
+                                                className="px-2 py-0.5 rounded-md bg-rose-500/15 border border-rose-500/40 text-rose-400 hover:bg-rose-500/25 text-[10px] font-semibold flex items-center gap-1 animate-fadeIn"
+                                              >
+                                                <Trash2 size={10} />
+                                                <span>{t.reelViewer.deleteCommentBtn}</span>
+                                              </button>
+                                            )}
+                                          </div>
+                                        </div>
+
+                                        <div className="flex items-start gap-1 shrink-0">
+                                          <button
+                                            type="button"
+                                            onClick={(e) => {
+                                              e.stopPropagation();
+                                              handleToggleReplyLike(c, r);
+                                            }}
+                                            className="flex flex-col items-center text-zinc-400 hover:text-white px-0.5 py-0.5 active:scale-110 transition-transform"
+                                            aria-label={t.reelViewer.likeBtnTitle}
+                                          >
+                                            <Heart
+                                              size={12}
+                                              className={`transition-colors ${
+                                                r.isLiked
+                                                  ? 'fill-[#FF0050] text-[#FF0050]'
+                                                  : 'text-zinc-400 hover:text-rose-400'
+                                              }`}
+                                            />
+                                            <span className={`text-[9px] mt-0.5 ${r.isLiked ? 'text-[#FF0050] font-semibold' : 'text-zinc-500'}`}>
+                                              {r.likes || 0}
+                                            </span>
+                                          </button>
+
+                                          {canDeleteThisReply && (
+                                            <button
+                                              type="button"
+                                              onClick={(e) => {
+                                                e.stopPropagation();
+                                                playClickSound();
+                                                setActiveCommentMenuKey((prev) =>
+                                                  prev === replyMenuKey ? null : replyMenuKey
+                                                );
+                                              }}
+                                              className="p-0.5 text-zinc-500 hover:text-white rounded-full"
+                                              aria-label={t.reelViewer.moreBtnTitle}
+                                            >
+                                              <MoreVertical size={12} />
+                                            </button>
+                                          )}
+                                        </div>
+                                      </div>
+                                    );
+                                  })
+                              )}
+                            </div>
+                          )}
                         </div>
-                        <p className="text-zinc-300 mt-0.5 leading-snug break-words">{c.text}</p>
+                      );
+                    })}
+
+                    {isLoadingMoreComments && (
+                      <div className="flex items-center justify-center py-3">
+                        <Loader2 size={18} className="animate-spin text-[#00FF88]" />
                       </div>
-                      <div className="flex flex-col items-center text-zinc-500 shrink-0">
-                        <Heart size={12} className="hover:text-red-500 cursor-pointer" />
-                        <span className="text-[10px]">{c.likes}</span>
-                      </div>
-                    </div>
-                  ))
+                    )}
+                  </>
                 ) : (
                   <div className="text-center py-8">
                     <p className="text-xs text-zinc-500">
@@ -869,6 +1539,13 @@ export const ReelViewerModal: React.FC<ReelViewerModalProps> = ({
                 <div className="pt-3 border-t border-zinc-800 text-center">
                   <p className="text-xs font-semibold text-rose-300">
                     {t.reelViewer.blockedCommentNotice}
+                  </p>
+                </div>
+              ) : isAuthorPrivateRestricted ? (
+                <div className="pt-3 border-t border-zinc-800 flex items-center justify-center gap-2 text-center">
+                  <Lock size={14} className="text-zinc-400 shrink-0" />
+                  <p className="text-xs font-semibold text-white">
+                    यह अकाउंट प्राइवेट है — सिर्फ़ फ़ॉलोअर्स कमेंट कर सकते हैं
                   </p>
                 </div>
               ) : (
@@ -936,13 +1613,38 @@ export const ReelViewerModal: React.FC<ReelViewerModalProps> = ({
                     </div>
                   )}
 
+                  {/* Replying-To Banner */}
+                  {replyingTo && (
+                    <div className="mb-2 px-3 py-1.5 rounded-xl bg-zinc-900 border border-[#00FF88]/40 flex items-center justify-between gap-2 animate-fadeIn">
+                      <span className="text-xs font-medium text-[#00FF88] truncate">
+                        {t.reelViewer.replyingToBanner(replyingTo.replyToUsername)}
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          playClickSound();
+                          setReplyingTo(null);
+                        }}
+                        className="text-zinc-400 hover:text-white p-0.5 rounded-full shrink-0"
+                        aria-label={t.common.cancel}
+                      >
+                        <X size={14} />
+                      </button>
+                    </div>
+                  )}
+
                   {/* Drawer Comment Form */}
                   <form onSubmit={handleSendComment} className="pt-2 border-t border-zinc-800 flex items-center gap-2">
                     <input
+                      ref={commentInputRef}
                       type="text"
                       value={commentInput + (isVoiceTyping && interimText ? ` ${interimText}` : '')}
                       onChange={(e) => setCommentInput(e.target.value)}
-                      placeholder={t.reelViewer.commentPlaceholder}
+                      placeholder={
+                        replyingTo
+                          ? t.reelViewer.replyPlaceholder(replyingTo.replyToUsername)
+                          : t.reelViewer.commentPlaceholder
+                      }
                       className={`flex-1 h-9 px-3 bg-zinc-800/90 border rounded-full text-xs text-white placeholder-zinc-500 focus:outline-none transition-all ${
                         isVoiceTyping
                           ? 'border-[#00FF88] ring-1 ring-[#00FF88]'

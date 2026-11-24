@@ -23,11 +23,12 @@ import {
   Clock,
   Ban,
   Languages,
+  UserPlus,
 } from 'lucide-react';
 import { playClickSound, playWinChime } from '../utils/audio';
 import { getCloudinaryConfig, uploadMediaToCloudinary, CloudinaryUploadResult } from '../utils/cloudinary';
 import { saveFeedbackToFirebase } from '../firebase/services';
-import { UserProfile, FeedbackItem, BlockedUserEntry, AppLanguage } from '../types';
+import { UserProfile, FeedbackItem, BlockedUserEntry, AppLanguage, FollowRequestItem } from '../types';
 import { useLanguage } from '../i18n/LanguageContext';
 import { SUPPORTED_LANGUAGES } from '../i18n/translations';
 
@@ -38,6 +39,7 @@ interface SettingsModalProps {
   dailyFollows: number;
   isPrivate: boolean;
   onTogglePrivacy: () => void;
+  privacyUpdating?: boolean;
   userProfile?: UserProfile;
   onOpenAuth?: () => void;
   goldenThemeEnabled?: boolean;
@@ -47,6 +49,9 @@ interface SettingsModalProps {
   onCancelDeletion?: () => Promise<void>;
   blockedUsers?: BlockedUserEntry[];
   onUnblockUser?: (username: string) => Promise<void> | void;
+  followRequests?: FollowRequestItem[];
+  onAcceptFollowRequest?: (req: FollowRequestItem) => Promise<void> | void;
+  onDeclineFollowRequest?: (req: FollowRequestItem) => Promise<void> | void;
   onLanguageChange?: (lang: AppLanguage) => void;
 }
 
@@ -57,6 +62,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   dailyFollows,
   isPrivate,
   onTogglePrivacy,
+  privacyUpdating = false,
   userProfile,
   onOpenAuth,
   goldenThemeEnabled = false,
@@ -66,6 +72,9 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   onCancelDeletion,
   blockedUsers = [],
   onUnblockUser,
+  followRequests = [],
+  onAcceptFollowRequest,
+  onDeclineFollowRequest,
   onLanguageChange,
 }) => {
   const { language, setLanguage, t } = useLanguage();
@@ -78,9 +87,11 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     | 'support-feedback'
     | 'account-closure'
     | 'blocked-users'
+    | 'follow-requests'
     | null
   >(null);
   const [unblockingUsername, setUnblockingUsername] = useState<string | null>(null);
+  const [busyRequestUid, setBusyRequestUid] = useState<string | null>(null);
   const [accountClosureStep, setAccountClosureStep] = useState<
     'choice' | 'deactivate-confirm' | 'delete-duration' | 'delete-confirm'
   >('choice');
@@ -229,30 +240,56 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
         </div>
 
         <div className="space-y-1">
-          {/* Account Privacy Toggle */}
-          <div
-            onClick={() => {
-              playClickSound();
-              onTogglePrivacy();
-            }}
-            className="flex items-center justify-between p-3 rounded-xl hover:bg-zinc-800/80 cursor-pointer transition-colors"
-          >
-            <div className="flex items-center gap-3">
-              <Lock size={18} className="text-zinc-400" />
-              <span className="text-sm text-zinc-200">{t.settings.accountPrivacy}</span>
-            </div>
+          {/* Account Privacy Toggle (Hidden for Guest Users) */}
+          {!isGuestUser && (
             <div
-              className={`w-10 h-5 rounded-full p-0.5 transition-colors ${
-                isPrivate ? 'bg-[#00FF88]' : 'bg-zinc-700'
+              onClick={() => {
+                if (privacyUpdating) return;
+                playClickSound();
+                onTogglePrivacy();
+              }}
+              className={`flex items-center justify-between p-3 rounded-xl hover:bg-zinc-800/80 cursor-pointer transition-colors ${
+                privacyUpdating ? 'opacity-60 pointer-events-none' : ''
               }`}
             >
+              <div className="flex items-center gap-3">
+                <Lock size={18} className="text-[#00FF88]" />
+                <span className="text-sm font-medium text-white">{t.settings.accountPrivacy}</span>
+              </div>
               <div
-                className={`w-4 h-4 rounded-full bg-black transition-transform ${
-                  isPrivate ? 'translate-x-5' : 'translate-x-0'
+                className={`w-10 h-5 rounded-full p-0.5 transition-colors ${
+                  isPrivate ? 'bg-[#00FF88]' : 'bg-zinc-700'
                 }`}
-              />
+              >
+                <div
+                  className={`w-4 h-4 rounded-full bg-black transition-transform ${
+                    isPrivate ? 'translate-x-5' : 'translate-x-0'
+                  }`}
+                />
+              </div>
             </div>
-          </div>
+          )}
+
+          {/* Follow Requests Section (Hidden for Guest Users) */}
+          {!isGuestUser && (
+            <div
+              onClick={() => {
+                playClickSound();
+                setActiveSubModal('follow-requests');
+              }}
+              className="flex items-center justify-between p-3 rounded-xl hover:bg-zinc-800/80 cursor-pointer transition-colors"
+            >
+              <div className="flex items-center gap-3">
+                <UserPlus size={18} className="text-[#00FF88]" />
+                <span className="text-sm font-medium text-white">फ़ॉलो रिक्वेस्ट</span>
+              </div>
+              {followRequests.length > 0 && (
+                <span className="text-[11px] font-bold bg-[#00FF88] text-black px-2 py-0.5 rounded-full">
+                  {followRequests.length}
+                </span>
+              )}
+            </div>
+          )}
 
           {/* Privacy Policy & Terms */}
           <div
@@ -844,7 +881,122 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
         </div>
       )}
 
-      {activeSubModal && activeSubModal !== 'account-closure' && activeSubModal !== 'blocked-users' && (
+      {activeSubModal && activeSubModal === 'follow-requests' && !isGuestUser && (
+        <div className="fixed inset-0 z-60 bg-black/95 backdrop-blur-md flex items-center justify-center p-4">
+          <div className="w-full max-w-sm bg-black border border-zinc-800 rounded-2xl p-5 space-y-4 shadow-2xl text-white max-h-[80vh] flex flex-col">
+            <div className="flex items-center justify-between pb-3 border-b border-zinc-800 shrink-0">
+              <div className="flex items-center gap-2">
+                <UserPlus size={18} className="text-[#00FF88]" />
+                <h4 className="text-base font-extrabold text-white">फ़ॉलो रिक्वेस्ट</h4>
+                {followRequests.length > 0 && (
+                  <span className="text-[11px] font-bold bg-[#00FF88] text-black px-2 py-0.5 rounded-full">
+                    {followRequests.length}
+                  </span>
+                )}
+              </div>
+              <button
+                type="button"
+                onClick={() => setActiveSubModal(null)}
+                className="p-1 text-zinc-400 hover:text-white rounded-full"
+                aria-label={t.common.close}
+              >
+                <X size={18} />
+              </button>
+            </div>
+
+            <div className="flex-1 overflow-y-auto space-y-2.5 pr-1 no-scrollbar min-h-[140px]">
+              {followRequests.length === 0 ? (
+                <div className="py-10 flex flex-col items-center justify-center text-center px-4">
+                  <div className="w-12 h-12 rounded-full bg-zinc-950 border border-zinc-800 flex items-center justify-center mb-3 text-zinc-400">
+                    <UserPlus size={20} />
+                  </div>
+                  <p className="text-xs font-semibold text-white">
+                    अभी कोई फ़ॉलो रिक्वेस्ट नहीं है
+                  </p>
+                </div>
+              ) : (
+                followRequests.map((req) => {
+                  const isBusy = busyRequestUid === req.requesterUid;
+                  return (
+                    <div
+                      key={req.requesterUid}
+                      className="p-3 rounded-xl bg-zinc-950 border border-zinc-800 flex items-center justify-between gap-2.5"
+                    >
+                      <div className="flex items-center gap-2.5 min-w-0 flex-1">
+                        <img
+                          src={
+                            req.requesterAvatar ||
+                            `https://api.dicebear.com/7.x/avataaars/svg?seed=${encodeURIComponent(
+                              req.requesterUsername || 'user'
+                            )}`
+                          }
+                          alt={req.requesterName || req.requesterUsername}
+                          className="w-10 h-10 rounded-full object-cover border border-zinc-700 shrink-0 bg-zinc-900"
+                        />
+                        <div className="min-w-0">
+                          <p className="text-xs font-bold text-white truncate">
+                            {req.requesterName || req.requesterUsername}
+                          </p>
+                          <p className="text-[11px] text-zinc-400 truncate">
+                            @{req.requesterUsername}
+                          </p>
+                        </div>
+                      </div>
+
+                      <div className="flex items-center gap-1.5 shrink-0">
+                        <button
+                          type="button"
+                          disabled={isBusy}
+                          onClick={async () => {
+                            if (!onAcceptFollowRequest) return;
+                            playClickSound();
+                            setBusyRequestUid(req.requesterUid);
+                            try {
+                              await onAcceptFollowRequest(req);
+                            } finally {
+                              setBusyRequestUid(null);
+                            }
+                          }}
+                          className="px-2.5 py-1.5 rounded-lg bg-[#00FF88] hover:bg-[#00e57a] text-black font-bold text-[11px] active:scale-95 transition-all disabled:opacity-50"
+                        >
+                          {isBusy ? '...' : 'मंज़ूर करें'}
+                        </button>
+                        <button
+                          type="button"
+                          disabled={isBusy}
+                          onClick={async () => {
+                            if (!onDeclineFollowRequest) return;
+                            playClickSound();
+                            setBusyRequestUid(req.requesterUid);
+                            try {
+                              await onDeclineFollowRequest(req);
+                            } finally {
+                              setBusyRequestUid(null);
+                            }
+                          }}
+                          className="px-2.5 py-1.5 rounded-lg bg-black border border-zinc-700 hover:bg-zinc-900 text-white font-semibold text-[11px] active:scale-95 transition-all disabled:opacity-50"
+                        >
+                          हटाएँ
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })
+              )}
+            </div>
+
+            <button
+              type="button"
+              onClick={() => setActiveSubModal(null)}
+              className="w-full py-2.5 rounded-xl border border-zinc-800 text-xs font-semibold text-white hover:bg-zinc-900 transition-colors shrink-0"
+            >
+              बंद करें
+            </button>
+          </div>
+        </div>
+      )}
+
+      {activeSubModal && activeSubModal !== 'account-closure' && activeSubModal !== 'blocked-users' && activeSubModal !== 'follow-requests' && (
         <div className="fixed inset-0 z-60 bg-black/85 backdrop-blur-md flex items-center justify-center p-4">
           <div className="w-full max-w-sm bg-[#1A1A1A] border border-zinc-800 rounded-2xl p-5 space-y-3 shadow-2xl">
             <div className="flex items-center justify-between pb-2 border-b border-zinc-800">
